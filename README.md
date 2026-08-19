@@ -37,7 +37,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/ccAzy/vpnplus/main/bootstrap
 只准备 Debian/Ubuntu 的基础工具，不装内核、不改防火墙、不重启。会检查/安装：
 
 ```text
-curl jq iproute2 iptables procps psmisc util-linux cron ethtool kmod ca-certificates
+curl jq git xz-utils tmux iproute2 iptables procps psmisc util-linux cron ethtool kmod ca-certificates
 ```
 
 > 第 0 步本身也需要 `curl`。极简 VPS 若没有 curl，先手动执行：

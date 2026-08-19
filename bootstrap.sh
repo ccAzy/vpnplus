@@ -49,9 +49,9 @@ MEM_MB=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || echo
 BOOT_MB=$(df -Pm /boot 2>/dev/null | awk 'NR==2 {print $4}')
 [ -n "${BOOT_MB:-}" ] && [ "$BOOT_MB" -lt 200 ] && warn "/boot 可用空间低于 200MB（当前 ${BOOT_MB}MB）"
 
-# 命令 -> Debian 包映射；这些包覆盖两个部署阶段使用的基础工具。
+# 命令 -> Debian 包映射；这些包覆盖 vpnplus 两个部署阶段与 Hermes CLI 的基础环境。
 PACKAGES=(
-    ca-certificates curl jq
+    ca-certificates curl jq git xz-utils tmux
     bash coreutils grep sed gawk
     iproute2 iptables procps psmisc util-linux
     cron ethtool kmod

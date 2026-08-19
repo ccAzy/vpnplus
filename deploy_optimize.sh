@@ -129,7 +129,7 @@ fi
 # procps、cron、ethtool 等第二阶段会用到的工具。缺包安装失败时明确中止，
 # 不再“apt 失败后继续运行再静默报错”。
 install_dependencies() {
-    local packages=(ca-certificates curl jq iproute2 iptables procps psmisc util-linux cron ethtool kmod)
+    local packages=(ca-certificates curl jq git xz-utils tmux iproute2 iptables procps psmisc util-linux cron ethtool kmod)
     local missing=() pkg
     for pkg in "${packages[@]}"; do
         dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q 'install ok installed' || missing+=("$pkg")

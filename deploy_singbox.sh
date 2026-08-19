@@ -104,7 +104,7 @@ check_env() {
     if ! command -v apt-get &>/dev/null; then fail "非 Debian/Ubuntu 系统，脚本仅支持 apt 系发行版"; return 1; fi
 
     # deploy_singbox 也可独立运行：补齐第一阶段可能未执行的工具。
-    local packages=(ca-certificates curl jq iproute2 iptables procps psmisc util-linux cron ethtool kmod)
+    local packages=(ca-certificates curl jq git xz-utils tmux iproute2 iptables procps psmisc util-linux cron ethtool kmod)
     local missing=() pkg
     for pkg in "${packages[@]}"; do
         dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q 'install ok installed' || missing+=("$pkg")

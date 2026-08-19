@@ -41,7 +41,7 @@ bash bootstrap.sh --check-only
 bash bootstrap.sh --dry-run
 ```
 
-`bootstrap.sh` 只检查/安装 Debian/Ubuntu 基础工具：`curl`、`jq`、`iproute2`、`iptables`、`procps`、`psmisc`、`util-linux`、`cron`、`ethtool`、`kmod`、`ca-certificates`。不装内核、不改防火墙、不写 sing-box 配置、不重启。
+`bootstrap.sh` 只检查/安装 Debian/Ubuntu 基础工具：`curl`、`jq`、`git`、`xz-utils`、`tmux`、`iproute2`、`iptables`、`procps`、`psmisc`、`util-linux`、`cron`、`ethtool`、`kmod`、`ca-certificates`。其中 `git`/`xz-utils` 供 Hermes 安装器使用，`tmux` 用于 SSH 断开后保持 Agent 会话。不装内核、不改防火墙、不写 sing-box 配置、不重启。
 
 > 第 0 步本身需要 curl。极简 VPS 没有 curl 时，先执行：
 > `apt-get update && apt-get install -y curl`
