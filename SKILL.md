@@ -12,6 +12,7 @@ description: >
 | 文件 | 用途 |
 |------|------|
 | `SKILL.md` | 本文件 — 完整部署指南 |
+| `bootstrap.sh` | **第0步** — 基础依赖安装与环境检查（不改防火墙/不重启） |
 | `deploy_optimize.sh` | **第1步** — BBRv3 强制校验 + 网络暴力优化 + 自动重启 |
 | `deploy_singbox.sh` | **第2步** — sing-box 部署（独立防火墙链 + 订阅 + Argo + WARP） |
 | `cleanup.sh` | 独立清理脚本（只删 vpnplus 自己的防火墙链，自动备份） |
@@ -28,7 +29,23 @@ description: >
 7. **网络感知 sysctl**：仅当无 IPv6 全局地址才关 `accept_ra`。
 8. **dry-run + 备份**：两部署脚本 + cleanup 均支持 `--dry-run`；cleanup 前自动备份规则到 `/var/backups/vpnplus/`。
 
-## 部署流程（三步）
+## 部署流程（四步）
+
+### 第 0 步：准备环境
+
+```bash
+bash bootstrap.sh
+# 只检查，不安装：
+bash bootstrap.sh --check-only
+# 预览待安装包：
+bash bootstrap.sh --dry-run
+```
+
+`bootstrap.sh` 只检查/安装 Debian/Ubuntu 基础工具：`curl`、`jq`、`iproute2`、`iptables`、`procps`、`psmisc`、`util-linux`、`cron`、`ethtool`、`kmod`、`ca-certificates`。不装内核、不改防火墙、不写 sing-box 配置、不重启。
+
+> 第 0 步本身需要 curl。极简 VPS 没有 curl 时，先执行：
+> `apt-get update && apt-get install -y curl`
+> 跳过第 0 步也可以：两个部署脚本会各自兜底安装依赖。
 
 ### 第 1 步：暴力优化 + BBRv3（强制校验） + 重启
 

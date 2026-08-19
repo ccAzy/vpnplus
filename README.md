@@ -26,7 +26,23 @@ vpnplus 基于 [ccAzy/ACVPN](https://github.com/ccAzy/ACVPN) 二次加固，把 
 
 ## 开始使用
 
-SSH 连上你的 VPS，按顺序执行下面两条命令。
+SSH 连上你的 VPS，按顺序执行下面三步。
+
+### 第 0 步：准备环境（推荐）
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/ccAzy/vpnplus/main/bootstrap.sh)
+```
+
+只准备 Debian/Ubuntu 的基础工具，不装内核、不改防火墙、不重启。会检查/安装：
+
+```text
+curl jq iproute2 iptables procps psmisc util-linux cron ethtool kmod ca-certificates
+```
+
+> 第 0 步本身也需要 `curl`。极简 VPS 若没有 curl，先手动执行：
+> `apt-get update && apt-get install -y curl`
+> 如果跳过第 0 步，`deploy_optimize.sh` 和 `deploy_singbox.sh` 也会各自再次尝试补齐依赖。
 
 ### 第 1 步：优化系统（自动重启）
 

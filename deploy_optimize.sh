@@ -124,16 +124,29 @@ EOF
     fi
 fi
 
-# ── 依赖 ──
-DEPS="curl jq"
-TO_INSTALL=""
-for dep in $DEPS; do
-    command -v "$dep" >/dev/null 2>&1 && continue
-    TO_INSTALL="$TO_INSTALL $dep"
-done
-[ -n "$TO_INSTALL" ] && { apt-get update -qq 2>/dev/null || true; apt-get install -y -qq $TO_INSTALL 2>/dev/null || true; }
-for dep in curl jq; do
-    command -v "$dep" >/dev/null 2>&1 || { fail "关键依赖缺失: $dep，请先执行 apt-get install -y curl jq"; exit 1; }
+# ── 依赖（bootstrap 的内置兜底；远程直接运行也能准备环境） ──
+# curl 是下载本脚本前的引导依赖；进入脚本后同时补齐 jq、iproute2、iptables、
+# procps、cron、ethtool 等第二阶段会用到的工具。缺包安装失败时明确中止，
+# 不再“apt 失败后继续运行再静默报错”。
+install_dependencies() {
+    local packages=(ca-certificates curl jq iproute2 iptables procps psmisc util-linux cron ethtool kmod)
+    local missing=() pkg
+    for pkg in "${packages[@]}"; do
+        dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q 'install ok installed' || missing+=("$pkg")
+    done
+    [ "${#missing[@]}" -eq 0 ] && { ok "基础依赖已齐全"; return 0; }
+    info "缺少依赖: ${missing[*]}"
+    $DRY_RUN && { info "[dry-run] apt-get update && apt-get install -y ${missing[*]}"; return 0; }
+    DEBIAN_FRONTEND=noninteractive apt-get update -qq || { fail "apt-get update 失败，检查软件源/网络"; return 1; }
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${missing[@]}" || { fail "依赖安装失败: ${missing[*]}"; return 1; }
+    ok "基础依赖安装完成"
+}
+
+# 先预检再访问 apt，避免非 Debian 系统在检查前就执行 apt-get。
+check_env
+install_dependencies || exit 1
+for dep in curl jq ip iptables ss systemctl; do
+    command -v "$dep" >/dev/null 2>&1 || { fail "关键命令缺失: $dep，请先执行 bootstrap.sh"; exit 1; }
 done
 
 PUBLIC_IP=$(curl -fsSL --max-time 5 https://api.ipify.org 2>/dev/null) \
@@ -361,7 +374,7 @@ ensure_grub_boot() {
 if $DRY_RUN; then echo -e "${YELLOW}═══ DRY-RUN 模式：仅预览，不修改系统 ═══${N}"; fi
 logo() { :; }
 
-check_env
+# check_env/install_dependencies 已在依赖阶段完成，这里不重复执行。
 
 step "1" "清理旧安装"
 if [ -f /etc/.vpnplus-singbox ]; then

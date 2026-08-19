@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-08-20 — 环境准备优化
+
+- 新增 `bootstrap.sh`：统一检查/安装 Debian/Ubuntu 基础依赖，不装内核、不改防火墙、不重启。
+- 两个部署脚本增加依赖兜底：即使跳过 bootstrap，也会明确安装缺失工具；apt 更新/安装失败直接中止，不再静默继续。
+- 依赖清单覆盖 `curl`、`jq`、`iproute2`、`iptables`、`procps`、`psmisc`、`util-linux`、`cron`、`ethtool`、`kmod`、`ca-certificates`。
+- apt 安装使用 `DEBIAN_FRONTEND=noninteractive`，减少 VPS 初始化时卡在交互配置界面的风险。
+- 修复 `deploy_optimize.sh` 在环境预检前就调用 apt 的顺序问题；非 Debian/Ubuntu 环境现在先明确退出。
+- README/SKILL 改为第 0 步环境准备 + 第 1/2/3 步部署、验证。
+
 ## 2026-08-20 — vpnplus 初版（ACVPN 加固迁移）
 
 本仓库由 [ccAzy/ACVPN](https://github.com/ccAzy/ACVPN) 迁移并加固而来。ACVPN 保持不动，此处为安全收敛版。

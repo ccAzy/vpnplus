@@ -98,10 +98,27 @@ install_singbox_yg() {
     return 1
 }
 
-# ── 环境预检 ──
+# ── 环境预检 + 第二阶段依赖兜底 ──
 check_env() {
-    if ! command -v systemctl &>/dev/null; then fail "无 systemd，sing-box 需要 systemd"; return 1; fi
     if [ "$(id -u)" -ne 0 ]; then fail "需要 root 权限"; return 1; fi
+    if ! command -v apt-get &>/dev/null; then fail "非 Debian/Ubuntu 系统，脚本仅支持 apt 系发行版"; return 1; fi
+
+    # deploy_singbox 也可独立运行：补齐第一阶段可能未执行的工具。
+    local packages=(ca-certificates curl jq iproute2 iptables procps psmisc util-linux cron ethtool kmod)
+    local missing=() pkg
+    for pkg in "${packages[@]}"; do
+        dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q 'install ok installed' || missing+=("$pkg")
+    done
+    if [ "${#missing[@]}" -gt 0 ]; then
+        info "缺少第二阶段依赖: ${missing[*]}"
+    DEBIAN_FRONTEND=noninteractive apt-get update -qq || { fail "apt-get update 失败，检查软件源/网络"; return 1; }
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${missing[@]}" || { fail "依赖安装失败: ${missing[*]}"; return 1; }
+        ok "第二阶段基础依赖安装完成"
+    fi
+    for cmd in curl jq ip ss iptables systemctl crontab pgrep pkill timeout sha256sum sysctl; do
+        command -v "$cmd" >/dev/null 2>&1 || { fail "关键命令缺失: $cmd，请先执行 bootstrap.sh"; return 1; }
+    done
+    if ! command -v systemctl &>/dev/null; then fail "无 systemd，sing-box 需要 systemd"; return 1; fi
     local mem_kb mem_mb
     mem_kb=$(grep MemTotal /proc/meminfo 2>/dev/null | awk '{print $2}' || echo 0)
     mem_mb=$((mem_kb / 1024))
