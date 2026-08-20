@@ -34,30 +34,20 @@ vpnplus 用来在 Debian/Ubuntu VPS 上快速部署代理节点，并自动完�
 
 ---
 
-## 三步部署
+## 三步一键部署
 
-### 1. 把项目放到 VPS
+公开仓库后，三步命令都可以直接执行，不需要克隆仓库：
 
-当前仓库如果是 Private，不能直接匿名执行 `raw.githubusercontent.com` 的远程命令。请先把项目上传到 VPS，或使用已经认证的 Git 方式克隆，然后进入目录：
+### 1. 准备环境
 
 ```bash
-cd /path/to/vpnplus
+bash <(curl -fsSL https://raw.githubusercontent.com/ccAzy/vpnplus/main/bootstrap.sh)
 ```
 
-如果仓库已经在 VPS 上，直接进入对应目录即可。
-
-### 2. 准备环境并优化系统
-
-先安装基础依赖：
+### 2. 优化系统
 
 ```bash
-bash bootstrap.sh
-```
-
-然后执行系统优化：
-
-```bash
-bash deploy_optimize.sh
+bash <(curl -fsSL https://raw.githubusercontent.com/ccAzy/vpnplus/main/deploy_optimize.sh)
 ```
 
 这一步会：
@@ -96,10 +86,10 @@ bash deploy_optimize.sh VERSION_PIN=x.y.z
 
 ### 3. 重启后部署 sing-box
 
-重新 SSH 登录 VPS 后执行：
+服务器重启后重新 SSH 登录，再执行：
 
 ```bash
-bash deploy_singbox.sh
+bash <(curl -fsSL https://raw.githubusercontent.com/ccAzy/vpnplus/main/deploy_singbox.sh)
 ```
 
 脚本会自动安装 sing-box、生成订阅、配置端口跳跃、Argo、WARP 和防火墙规则。完成后会直接在终端打印订阅链接。
@@ -109,6 +99,16 @@ bash deploy_singbox.sh
 - Clash Verge / Mihomo Party
 - sing-box 客户端
 - 其他支持对应订阅格式的客户端
+
+> 当前仓库暂时是 Private，公开前远程命令会返回 HTTP 404。临时使用本地文件方式：
+>
+> ```bash
+> cd /path/to/vpnplus
+> bash bootstrap.sh
+> bash deploy_optimize.sh
+> # 重启并重新连接后：
+> bash deploy_singbox.sh
+> ```
 
 ---
 
