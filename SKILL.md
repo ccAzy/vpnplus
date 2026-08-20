@@ -16,7 +16,7 @@ description: >
 | `deploy_optimize.sh` | **第1步** — BBRv3 强制校验 + TCP/UDP + ethtool + 动态 RPS/XPS/fq + 自动重启 |
 | `deploy_singbox.sh` | **第2步** — sing-box 部署（独立防火墙链 + 订阅 + Argo + WARP） |
 | `cleanup.sh` | 独立清理脚本（只删 vpnplus 自己的防火墙链，自动备份） |
-| `verify.sh` | 部署后验证（进程/端口/独立链/Argo/订阅/域名分流） |
+| `verify.sh` | 部署后验证（进程/端口/BBR/fq/网卡/独立链/Argo/订阅/域名分流） |
 
 ## 核心安全设计（相对 ACVPN 的关键差异）
 
@@ -28,6 +28,7 @@ description: >
 6. **安全默认**：`VMESS_LOCK` 默认 `on`（明文 VMess 端口公网 DROP，仅 Argo 回环可达）。
 7. **网络感知 sysctl**：仅当无 IPv6 全局地址才关 `accept_ra`。
 8. **dry-run + 备份**：两部署脚本 + cleanup 均支持 `--dry-run`；cleanup 前自动备份规则到 `/var/backups/vpnplus/`。
+9. **conntrack 协同调优**：`nf_conntrack_max` 按内存分级，并在模块支持时同步 hashsize，避免只增大表上限而放大桶冲突。
 
 ## 部署流程（从第一步开始）
 

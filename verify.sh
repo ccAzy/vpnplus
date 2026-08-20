@@ -10,10 +10,12 @@
 set -uo pipefail
 
 SERVER_IP="${1:-}"
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; N='\033[0m'
+VMESS_LOCK="${VMESS_LOCK:-on}"
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; N='\033[0m'
 ok()   { echo -e "${GREEN}[✓]${N}   $*"; }
 warn() { echo -e "${YELLOW}[!]${N}   $*"; }
 fail() { echo -e "${RED}[✗]${N}   $*"; }
+info() { echo -e "${CYAN}[*]${N}   $*"; }
 
 PASS=0; FAIL=0
 CHAIN_PORTHOP="ACVPN_PORTHOP"
@@ -47,6 +49,27 @@ else
     warn "modinfo 不可用，跳过 BBRv3 检测"
 fi
 
+IFACE=$(ip route 2>/dev/null | awk '/default/ {print $5; exit}' || true)
+if [ -n "$IFACE" ] && command -v ethtool >/dev/null 2>&1; then
+    if ethtool -k "$IFACE" 2>/dev/null | grep -q 'tx-udp-segmentation: on'; then
+        ok "UDP 分段卸载已开启（Hy2/Tuic）"; PASS=$((PASS + 1))
+    else
+        warn "UDP 分段卸载未开启或驱动不支持"
+    fi
+fi
+if [ -n "$IFACE" ] && command -v tc >/dev/null 2>&1; then
+    if tc qdisc show dev "$IFACE" 2>/dev/null | grep -qE '(^| )fq([ _]|$)'; then
+        ok "默认网卡 fq 队列调度已启用"; PASS=$((PASS + 1))
+    else
+        warn "默认网卡未检测到 fq 队列调度"
+    fi
+fi
+if systemctl is-active --quiet vpnplus-net-tuning.service 2>/dev/null; then
+    ok "持久化网络调优服务运行中"; PASS=$((PASS + 1))
+else
+    warn "持久化网络调优服务未运行（可能尚未执行 deploy_optimize.sh）"
+fi
+
 # 2. 进程
 echo "--- 进程检查 ---"
 if pgrep -f sing-box >/dev/null; then
@@ -65,6 +88,16 @@ if ss -ulnp 2>/dev/null | grep -q sing-box; then ok "UDP 端口监听正常（Hy
 # 独立命名链存在性（vpnplus 防火墙设计核心）
 if iptables -t nat -L "$CHAIN_PORTHOP" -n >/dev/null 2>&1; then ok "端口跳跃链 ${CHAIN_PORTHOP:-ACVPN_PORTHOP} 存在"; PASS=$((PASS + 1)); else warn "端口跳跃链不存在（可能未配置端口跳跃）"; fi
 if iptables -L "$CHAIN_ANTIPROBE" -n >/dev/null 2>&1; then ok "防探测链 ${CHAIN_ANTIPROBE:-ACVPN_ANTIPROBE} 存在"; PASS=$((PASS + 1)); else warn "防探测链不存在"; fi
+
+if [ "$VMESS_LOCK" = "on" ]; then
+    if iptables-save 2>/dev/null | grep -q '! -i lo'; then
+        ok "VMess 明文端口公网封锁中"; PASS=$((PASS + 1))
+    else
+        warn "未检测到 VMess 明文端口回环锁定规则"
+    fi
+else
+    info "VMESS_LOCK=off：跳过明文 VMess 公网封锁检查"
+fi
 
 # 4. Argo
 echo "--- Argo 隧道 ---"

@@ -265,7 +265,7 @@ install_bbrv3() {
 # ── 网络优化（保持 ACVPN 的三级内存分级 + ethtool 尽力降级） ──
 apply_sysctl() {
     info "应用网络暴力优化..."
-    local mem_kb mem_mb RMEM TCPMEM CONNTRACK_MAX
+    local mem_kb mem_mb RMEM TCPMEM CONNTRACK_MAX CONNTRACK_HASH
     mem_kb=$(grep MemTotal /proc/meminfo 2>/dev/null | awk '{print $2}' || echo 0)
     mem_mb=$((mem_kb / 1024))
     if [ "$mem_mb" -ge 8192 ]; then
@@ -277,16 +277,22 @@ apply_sysctl() {
     fi
 
     if [ "$mem_mb" -ge 8192 ]; then
-        CONNTRACK_MAX=1000000
+        CONNTRACK_MAX=1000000; CONNTRACK_HASH=262144
     elif [ "$mem_mb" -ge 2048 ]; then
-        CONNTRACK_MAX=500000
+        CONNTRACK_MAX=500000; CONNTRACK_HASH=131072
     else
-        CONNTRACK_MAX=130000
+        CONNTRACK_MAX=130000; CONNTRACK_HASH=32768
     fi
 
     if command -v modprobe >/dev/null 2>&1; then
         if ! run modprobe tcp_bbr; then
             warn "tcp_bbr 模块加载失败，BBR 可能不可用"
+        fi
+        run modprobe nf_conntrack || true
+    fi
+    if [ -w /sys/module/nf_conntrack/parameters/hashsize ]; then
+        if ! run bash -c "printf '%s\\n' '$CONNTRACK_HASH' > /sys/module/nf_conntrack/parameters/hashsize"; then
+            warn "nf_conntrack hashsize 写入失败，连接跟踪仍使用内核默认桶数"
         fi
     fi
 
@@ -330,7 +336,8 @@ SYS"
     if ! run sysctl --system; then
         warn "sysctl --system 执行失败，部分网络参数可能未生效"
     fi
-    ok "网络参数已写入 $conf 并应用（按内存分级，防 OOM）"
+    manifest "conntrack max=$CONNTRACK_MAX hash=$CONNTRACK_HASH"
+    ok "网络参数已写入 $conf 并应用（conntrack=$CONNTRACK_MAX，按内存分级防 OOM）"
 }
 
 apply_ethtool() {

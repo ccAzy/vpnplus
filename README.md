@@ -195,6 +195,7 @@ net.core.default_qdisc = fq
 
 - TCP/UDP 读写缓冲区
 - `tcp_mem` 内存页分级
+- `nf_conntrack_max` 与 hashsize 协同分级，降低高并发冲突
 - TCP 自动接收缓冲
 - TCP metrics 策略
 - 输出队列限制
@@ -255,10 +256,12 @@ SERVER_IP="你的服务器IP" bash verify.sh
 - `sb` 命令和 sing-box 二进制
 - `/etc/s-box` 配置目录
 - BBRv3 模块提示
+- UDP 分段卸载、fq 队列和持久化网络调优服务
 - sing-box 进程
 - TCP/UDP 监听端口
 - `ACVPN_PORTHOP` 端口跳跃链
 - `ACVPN_ANTIPROBE` 防探测链
+- `VMESS_LOCK=on` 时的明文 VMess 回环锁定规则
 - Argo URL 和 HTTP 端点
 - 三种订阅格式的 HTTP 状态
 - 域名分流文件和规则数量
