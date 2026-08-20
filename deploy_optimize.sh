@@ -64,6 +64,11 @@ ok()    { echo -e "${GREEN}[✓]${N}   $*"; }
 warn()  { echo -e "${YELLOW}[!]${N}   $*"; }
 fail()  { echo -e "${RED}[✗]${N}   $*"; }
 
+if [ -n "$VERSION_PIN" ] && [[ ! "$VERSION_PIN" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    fail "VERSION_PIN 格式无效：$VERSION_PIN（应为 x.y.z，例如 7.3.2）"
+    exit 2
+fi
+
 # dry-run 包装：--dry-run 时不执行副作用命令
 run() {
     if $DRY_RUN; then info "[dry-run] $*"; return 0; fi
@@ -82,8 +87,9 @@ check_env() {
     local fail_flag=0
     if ! command -v apt-get &>/dev/null; then fail "非 Debian/Ubuntu 系统，脚本仅支持 apt 系发行版"; fail_flag=1; fi
     if [ "$(id -u)" -ne 0 ]; then fail "需要 root 权限运行"; fail_flag=1; fi
-    local mem_kb=$(grep MemTotal /proc/meminfo 2>/dev/null | awk '{print $2}' || echo 0)
-    local mem_mb=$((mem_kb / 1024))
+    local mem_kb mem_mb
+    mem_kb=$(grep MemTotal /proc/meminfo 2>/dev/null | awk '{print $2}' || echo 0)
+    mem_mb=$((mem_kb / 1024))
     info "内存: ${mem_mb}MB"
     if [ "$mem_mb" -gt 0 ] && [ "$mem_mb" -lt 768 ]; then
         warn "内存不足 768MB（当前 ${mem_mb}MB），BBRv3 内核安装可能失败"
@@ -120,7 +126,11 @@ EOF
         exit 0
     else
         warn "标记文件存在但内核未使用 BBRv3（可能已更新），重新执行优化"
-        rm -f "$MARK"
+        if $DRY_RUN; then
+            info "[dry-run] 删除失效优化标记: $MARK"
+        else
+            rm -f "$MARK"
+        fi
     fi
 fi
 
@@ -144,8 +154,13 @@ install_dependencies() {
 
 # 先预检再访问 apt，避免非 Debian 系统在检查前就执行 apt-get。
 check_env
+if $DRY_RUN; then
+    install_dependencies
+    info "[dry-run] 环境预检完成；跳过内核下载、系统写入和重启"
+    exit 0
+fi
 install_dependencies || exit 1
-for dep in curl jq ip iptables ss systemctl; do
+for dep in curl jq git xz tmux ip iptables ss tc systemctl; do
     command -v "$dep" >/dev/null 2>&1 || { fail "关键命令缺失: $dep，请先执行 bootstrap.sh"; exit 1; }
 done
 
@@ -230,8 +245,10 @@ install_bbrv3() {
     fi
 
     # 验证新内核文件已就位（防 dpkg 成功但未解包，重启后无法开机）
-    if ls /boot/vmlinuz-*bbrv3* >/dev/null 2>&1; then
-        ok "新内核文件已就位: $(ls /boot/vmlinuz-*bbrv3* 2>/dev/null | head -1)"
+    local kernel_file
+    kernel_file=$(find /boot -maxdepth 1 -type f -name 'vmlinuz-*bbrv3*' -print -quit 2>/dev/null || true)
+    if [ -n "$kernel_file" ]; then
+        ok "新内核文件已就位: $kernel_file"
     else
         fail "未检测到 bbrv3 内核文件，安装可能未生效，中止重启"; return 1
     fi
@@ -239,7 +256,7 @@ install_bbrv3() {
     # grub 菜单可见（部分 VPS 默认 timeout=0）
     if grep -q '^GRUB_TIMEOUT=0' /etc/default/grub 2>/dev/null; then
         run sed -i 's/^GRUB_TIMEOUT=0/GRUB_TIMEOUT=10/g' /etc/default/grub
-        run update-grub || true
+        run update-grub || warn "update-grub 失败，GRUB 菜单可能未更新"
     fi
     rm -f /tmp/bbrv3.deb
     ok "BBRv3 已安装（重启后生效）"
@@ -248,21 +265,44 @@ install_bbrv3() {
 # ── 网络优化（保持 ACVPN 的三级内存分级 + ethtool 尽力降级） ──
 apply_sysctl() {
     info "应用网络暴力优化..."
-    local mem_kb mem_mb RMEM WMEM TCPMEM
+    local mem_kb mem_mb RMEM TCPMEM CONNTRACK_MAX
     mem_kb=$(grep MemTotal /proc/meminfo 2>/dev/null | awk '{print $2}' || echo 0)
     mem_mb=$((mem_kb / 1024))
-    if [ "$mem_mb" -ge 8192 ]; then RMEM="134217728"; TCPMEM="8388608"      # ≥8GB
-    elif [ "$mem_mb" -ge 2048 ]; then RMEM="67108864"; TCPMEM="4194304"     # 2-8GB
-    else RMEM="16777216"; TCPMEM="1048576"; fi                              # <2GB
+    if [ "$mem_mb" -ge 8192 ]; then
+        RMEM="134217728"; TCPMEM="65536 262144 1048576"       # ≥8GB，页数=256MB/1GB/4GB
+    elif [ "$mem_mb" -ge 2048 ]; then
+        RMEM="67108864"; TCPMEM="32768 65536 131072"          # 2-8GB，页数=128MB/256MB/512MB
+    else
+        RMEM="16777216"; TCPMEM="16384 32768 65536"           # <2GB，页数=64MB/128MB/256MB
+    fi
+
+    if [ "$mem_mb" -ge 8192 ]; then
+        CONNTRACK_MAX=1000000
+    elif [ "$mem_mb" -ge 2048 ]; then
+        CONNTRACK_MAX=500000
+    else
+        CONNTRACK_MAX=130000
+    fi
+
+    if command -v modprobe >/dev/null 2>&1; then
+        if ! run modprobe tcp_bbr; then
+            warn "tcp_bbr 模块加载失败，BBR 可能不可用"
+        fi
+    fi
 
     local conf="/etc/sysctl.d/99-vpnplus-brutal.conf"
     run bash -c "cat > '$conf' <<'SYS'
-# vpnplus 网络暴力优化（按内存分级，防 OOM）
+# vpnplus 网络优化（按内存分级，防 OOM；tcp_mem 单位为内存页）
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
 net.core.rmem_max = $RMEM
 net.core.wmem_max = $RMEM
 net.ipv4.tcp_rmem = 4096 87380 $RMEM
 net.ipv4.tcp_wmem = 4096 65536 $RMEM
-net.ipv4.tcp_mem = $TCPMEM $((TCPMEM*2)) $((TCPMEM*3))
+net.ipv4.tcp_mem = $TCPMEM
+net.ipv4.tcp_moderate_rcvbuf = 1
+net.ipv4.tcp_no_metrics_save = 1
+net.ipv4.tcp_limit_output_bytes = 262144
 net.core.netdev_max_backlog = 262144
 net.core.somaxconn = 65535
 net.ipv4.tcp_max_syn_backlog = 8192
@@ -273,7 +313,7 @@ net.ipv4.tcp_keepalive_time = 120
 net.ipv4.tcp_keepalive_intvl = 30
 net.ipv4.tcp_keepalive_probes = 3
 net.ipv4.ip_local_port_range = 1024 65535
-net.netfilter.nf_conntrack_max = $([ \"\$mem_mb\" -ge 8192 ] && echo 1000000 || ( [ \"\$mem_mb\" -ge 2048 ] && echo 500000 || echo 130000 ))
+net.netfilter.nf_conntrack_max = $CONNTRACK_MAX
 net.ipv4.tcp_app_win = 0
 net.ipv4.tcp_early_retrans = 3
 net.ipv4.tcp_thin_linear_timeouts = 1
@@ -287,7 +327,9 @@ net.ipv4.udp_wmem_min = 8192
 net.core.busy_read = 50
 net.core.busy_poll = 50
 SYS"
-    run sysctl --system >/dev/null 2>&1 || true
+    if ! run sysctl --system; then
+        warn "sysctl --system 执行失败，部分网络参数可能未生效"
+    fi
     ok "网络参数已写入 $conf 并应用（按内存分级，防 OOM）"
 }
 
@@ -307,6 +349,20 @@ apply_ethtool() {
     ok "ethtool 深度优化完成（不支持的项已自动跳过）"
 }
 
+apply_qdisc() {
+    local iface
+    iface=$(ip route 2>/dev/null | awk '/default/ {print $5; exit}' || true)
+    if [ -z "$iface" ]; then
+        warn "无法识别默认网卡，跳过 fq 队列调度"
+        return 1
+    fi
+    if ! run tc qdisc replace dev "$iface" root fq; then
+        warn "fq 队列调度应用失败，BBR 仍会运行但节奏控制可能不理想"
+        return 1
+    fi
+    ok "fq 队列调度已应用到 $iface"
+}
+
 boost_limits() {
     run bash -c "cat > /etc/security/limits.d/99-vpnplus.conf <<'LIMITS'
 * soft nofile 1048576
@@ -322,27 +378,68 @@ LIMITS"
 }
 
 apply_rss() {
-    # RSS 多队列：默认网卡 RPS/RFS 全核 + 持久化 systemd
-    local iface cores
-    iface=$(ip route 2>/dev/null | awk '/default/ {print $5; exit}' || true)
-    [ -z "$iface" ] && { warn "无法识别网卡，跳过 RSS"; return 1; }
-    cores=$(nproc)
-    local rps_flow
-    rps_flow=$((cores * 32768))
-    run bash -c "cat > /etc/systemd/system/acvpn-rss.service <<'UNIT'
+    # 多队列网络调优：所有 RX/TX 队列的 RPS/XPS + ethtool + fq 持久化。
+    run bash -c "cat > /usr/local/sbin/vpnplus-net-tuning.sh <<'TUNE'
+#!/bin/bash
+set -u
+
+iface=\$(ip route 2>/dev/null | awk '/default/ {print \$5; exit}')
+[ -n \"\$iface\" ] || { echo '[vpnplus-net-tuning] no default interface' >&2; exit 1; }
+[ -d \"/sys/class/net/\$iface\" ] || { echo \"[vpnplus-net-tuning] interface not found: \$iface\" >&2; exit 1; }
+
+cores=\$(nproc 2>/dev/null || echo 1)
+if [ \"\$cores\" -ge 64 ]; then
+    cpu_mask=ffffffffffffffff
+else
+    cpu_mask=\$(printf '%x' \$(( (1 << cores) - 1 )))
+fi
+rps_flow=\$((cores * 32768))
+
+command -v ethtool >/dev/null 2>&1 && {
+    ethtool -G \"\$iface\" rx 4096 tx 4096 2>/dev/null || true
+    ethtool -K \"\$iface\" tx-checksumming on rx-checksumming on 2>/dev/null || true
+    ethtool -K \"\$iface\" tso on gso on gro on 2>/dev/null || true
+    ethtool -K \"\$iface\" tx-udp-segmentation on 2>/dev/null || true
+    ethtool -C \"\$iface\" adaptive-rx off adaptive-tx off 2>/dev/null || true
+    ethtool -C \"\$iface\" rx-usecs 16 tx-usecs 16 2>/dev/null || true
+}
+
+rx_count=0
+for queue in /sys/class/net/\$iface/queues/rx-*; do
+    [ -d \"\$queue\" ] || continue
+    printf '%s\\n' \"\$cpu_mask\" > \"\$queue/rps_cpus\" 2>/dev/null || true
+    printf '%s\\n' \"\$rps_flow\" > \"\$queue/rps_flow_cnt\" 2>/dev/null || true
+    rx_count=\$((rx_count + 1))
+done
+for queue in /sys/class/net/\$iface/queues/tx-*; do
+    [ -d \"\$queue\" ] || continue
+    printf '%s\\n' \"\$cpu_mask\" > \"\$queue/xps_cpus\" 2>/dev/null || true
+done
+
+tc qdisc replace dev \"\$iface\" root fq 2>/dev/null || true
+if [ \"\$rx_count\" -gt 0 ]; then
+    sysctl -w net.core.rps_sock_flow_entries=\$((rx_count * rps_flow)) >/dev/null 2>&1 || true
+fi
+echo \"[vpnplus-net-tuning] applied iface=\$iface cores=\$cores rx_queues=\$rx_count mask=\$cpu_mask\"
+TUNE
+chmod +x /usr/local/sbin/vpnplus-net-tuning.sh
+cat > /etc/systemd/system/vpnplus-net-tuning.service <<'UNIT'
 [Unit]
-Description=vpnplus RSS queues
-After=network.target
+Description=vpnplus persistent network tuning
+After=network-online.target
+Wants=network-online.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/bin/bash -c 'echo ffff > /sys/class/net/$iface/queues/rx-0/rps_cpus; echo $rps_flow > /sys/class/net/$iface/queues/rx-0/rps_flow_cnt'
+ExecStart=/usr/local/sbin/vpnplus-net-tuning.sh
 [Install]
 WantedBy=multi-user.target
 UNIT"
     run systemctl daemon-reload || true
-    run systemctl enable acvpn-rss.service || true
-    ok "RSS 多队列已配置并持久化 (acvpn-rss.service)"
+    if ! run systemctl enable --now vpnplus-net-tuning.service; then
+        warn "网络调优 systemd 服务启用失败，重启后可能不会自动恢复网卡参数"
+    fi
+    ok "多队列 RPS/XPS、ethtool、fq 已配置并持久化 (vpnplus-net-tuning.service)"
 }
 
 # ── GRUB 默认内核校验（防重启后进旧内核） ──
@@ -360,10 +457,14 @@ ensure_grub_boot() {
 
     gd=$(grep -oP '^GRUB_DEFAULT=\K.*' /etc/default/grub 2>/dev/null | head -1 || true)
     if [ "$gd" = "saved" ]; then
-        run grub-set-default "$target" && ok "GRUB_DEFAULT=saved 已设为 BBRv3 (index $target)" || warn "grub-set-default 失败"
+        if run grub-set-default "$target"; then
+            ok "GRUB_DEFAULT=saved 已设为 BBRv3 (index $target)"
+        else
+            warn "grub-set-default 失败"
+        fi
     elif [ -z "$gd" ] || [ "$gd" = "0" ]; then
         run sed -i "s/^GRUB_DEFAULT=.*/GRUB_DEFAULT=$target/" /etc/default/grub
-        run update-grub || true
+        run update-grub || warn "update-grub 失败，GRUB 默认项可能未保存"
         ok "GRUB_DEFAULT 已设为 $target (BBRv3)"
     else
         info "GRUB_DEFAULT=$gd，BBRv3 位于 index $target；若重启未进新内核请手动改"
@@ -405,6 +506,7 @@ fi
 step "3" "网络暴力优化"
 apply_sysctl
 apply_ethtool
+apply_qdisc || true
 boost_limits
 apply_rss
 

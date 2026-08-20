@@ -1,196 +1,419 @@
 <p align="center">
   <img src="https://img.shields.io/badge/license-GPLv3-green" alt="license">
   <img src="https://img.shields.io/badge/platform-Debian%2FUbuntu-orange" alt="platform">
-  <img src="https://img.shields.io/badge/kernel-BBRv3--max-blue" alt="bbrv3">
+  <img src="https://img.shields.io/badge/service-sing--box-blue" alt="sing-box">
 </p>
 
 <h1 align="center">vpnplus</h1>
-<p align="center"><strong>sing-box 一键部署的加固版。两条命令，安全落地。</strong></p>
+<p align="center"><strong>面向 VPS 的 sing-box 节点部署、网络优化与安全清理工具。</strong></p>
 
 ---
 
-## 是什么
+## 这是什么
 
-vpnplus 基于 [ccAzy/ACVPN](https://github.com/ccAzy/ACVPN) 二次加固，把 **内核优化 + sing-box 部署 + 订阅生成** 打包成两条命令，并在安全边界上做了体系化收敛：
+vpnplus 将以下工作整合成一套可重复执行的 Bash 流程：
 
-- 内核自动装上 BBRv3 + 网络/安全参数极限调优（按内存分级防 OOM）
-- sing-box 自动配好五协议 + 端口跳跃 + Argo 隧道 + WARP 域名分流
-- 订阅链接直接打印在终端，复制到客户端就能用
-- **独立防火墙链**：重跑/卸载只动 vpnplus 自己的链，绝不误删 fail2ban / Docker 等第三方规则
-- **外部脚本锁定 + 强制校验**：sb.sh 固定到 commit 并 SHA256 校验，失败即中止
-- **安全默认**：明文 VMess 端口默认封锁公网（仅 Argo 回环可达）
+- Debian/Ubuntu VPS 环境准备
+- BBRv3 内核安装与强制 SHA256 校验
+- BBR + fq + TCP/UDP 参数优化
+- 按内存分级的网络缓冲和连接跟踪表
+- 动态 RX/RPS 与 TX/XPS 多队列调优
+- ethtool 网卡参数与 systemd 开机持久化
+- sing-box 协议部署、订阅生成和节点管理
+- Hysteria2/Tuic5 端口跳跃
+- Argo 临时隧道与掉线保活
+- WARP 域名分流
+- 独立防火墙链、防主动探测和安全清理
+- 部署后检查、订阅 HTTP 实测和卸载验证
 
-> 基于 [甬哥 sing-box-yg](https://github.com/yonggekkk/sing-box-yg) 二次开发（自维护 fork [ccAzy/sing-box-yg](https://github.com/ccAzy/sing-box-yg)）。要求 Debian 11+ / Ubuntu 22.04+，公网 IPv4，≥ 512MB 内存。
+它不会承诺“所有线路都自动变快”。服务器参数只能改善 VPS 侧的处理能力；运营商绕路、国际出口拥塞、VPS 商家限速和移动网络 QoS，仍然需要用真实测速区分。
 
 ---
 
-## 开始使用
+## 文件结构
 
-SSH 连上你的 VPS，按顺序执行下面三步。
+| 文件 | 作用 |
+|---|---|
+| `bootstrap.sh` | 部署前置：检查/安装基础依赖，不装内核、不部署 sing-box、不重启 |
+| `deploy_optimize.sh` | 系统与网络优化：BBRv3、TCP/UDP、ethtool、RPS/XPS、fq、资源限制、GRUB |
+| `deploy_singbox.sh` | sing-box 部署：协议、订阅、端口跳跃、Argo、WARP、防火墙和保活 |
+| `verify.sh` | 部署后检查：进程、端口、防火墙链、Argo、订阅、域名分流 |
+| `cleanup.sh` | 安全清理：备份规则、停止服务、删除自身配置并验证结果 |
+| `SKILL.md` | 面向 Agent 的部署和排障说明 |
 
-### 第 0 步：准备环境（推荐）
+---
+
+## 使用前提
+
+目标机器需要：
+
+- Debian/Ubuntu 系 apt 环境
+- root 权限
+- systemd
+- `x86_64` 或 `aarch64` 架构
+- 公网 IPv4 更容易完成订阅和节点连接
+- 建议至少 1GB 内存；512MB 也可尝试，但 BBRv3、Argo、WARP 同时运行时更容易出现内存压力
+- `/boot` 至少保留约 200MB 可用空间，用于内核安装
+
+当前仓库如果保持 Private，VPS 不能匿名读取 `raw.githubusercontent.com`。请先将仓库目录上传到 VPS，或使用已认证的 Git 方式克隆；不要把 GitHub Token 直接写进命令行。
+
+以下命令均假设你已经进入仓库目录：
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/ccAzy/vpnplus/main/bootstrap.sh)
+cd /path/to/vpnplus
 ```
 
-只准备 Debian/Ubuntu 的基础工具，不装内核、不改防火墙、不重启。会检查/安装：
+---
+
+## 三步部署
+
+### 第一步：准备环境
+
+```bash
+bash bootstrap.sh
+```
+
+它会检查/安装：
 
 ```text
-curl jq git xz-utils tmux iproute2 iptables procps psmisc util-linux cron ethtool kmod ca-certificates
+curl jq git xz-utils tmux bash coreutils grep sed gawk
+iproute2 iptables procps psmisc util-linux cron ethtool kmod ca-certificates
 ```
 
-> 第 0 步本身也需要 `curl`。极简 VPS 若没有 curl，先手动执行：
-> `apt-get update && apt-get install -y curl`
-> 如果跳过第 0 步，`deploy_optimize.sh` 和 `deploy_singbox.sh` 也会各自再次尝试补齐依赖。
+不会执行：
 
-### 第 1 步：优化系统（自动重启）
+- 内核安装
+- 防火墙改动
+- sing-box 配置
+- 系统重启
+
+预览或只检查：
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/ccAzy/vpnplus/main/deploy_optimize.sh)
+bash bootstrap.sh --dry-run       # 只显示缺少的软件包
+bash bootstrap.sh --check-only   # 只检查，不执行 apt update/install
 ```
 
-装上 BBRv3 极致内核，把 TCP/UDP 参数拉到极限。跑完 10 秒后自动重启。
-
-> 2-5 分钟。SSH 断开是正常的，等 30 秒重新连。
-> 预检场景可用 `--no-reboot` 跳过自动重启，稍后手动 `reboot`。
-> 支持 `--dry-run` 预览、`VERSION_PIN=x.y.z` 锁定内核版本。
-> 内核包 **强制** SHA256 校验，校验缺失/失败一律中止安装，不解降级。
-
-### 第 2 步：部署 sing-box（重启后）
+极简系统没有 curl 时，需要先手动准备：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ccAzy/vpnplus/main/deploy_singbox.sh | bash
+apt-get update && apt-get install -y curl
 ```
 
-安装 sing-box → 生成订阅 → 配端口跳跃 → 开 Argo 隧道 → 装 WARP 分流。
+### 第二步：系统与网络优化
 
-> 3-8 分钟。跑完后终端直接打印订阅链接。
-> **sb.sh 锁定到固定 commit + SHA256 校验**，防供应链篡改。
-> 重复执行**不会覆盖**现有配置（幂等设计）。
-> 支持 `--dry-run` 预览；`VMESS_LOCK=off` 可显式放开明文 VMess 端口。
+```bash
+bash deploy_optimize.sh
+```
 
-### 第 3 步：导入客户端
+执行流程：
 
-把第 2 步打印的链接粘贴到客户端（Clash Verge / Mihomo Party / sing-box 等），选节点，开代理。
+```text
+环境预检
+→ 清理旧 sing-box 残留
+→ 获取 BBRv3 内核包
+→ 强制 SHA256 校验
+→ dpkg 安装并检查内核文件
+→ 写入网络参数
+→ 应用 BBR/fq
+→ 应用 ethtool
+→ 配置所有 RX/RPS 与 TX/XPS 队列
+→ 创建开机持久化网络调优服务
+→ 提升 nofile/nproc
+→ 检查 GRUB 默认内核
+→ 写入成功标记
+→ 10 秒后重启
+```
 
-> 旧服务器先清理残留：`bash <(curl -fsSL https://raw.githubusercontent.com/ccAzy/vpnplus/main/cleanup.sh)`（支持 `--force --dry-run`）
+支持参数：
+
+```bash
+bash deploy_optimize.sh --no-reboot
+bash deploy_optimize.sh --dry-run
+bash deploy_optimize.sh VERSION_PIN=x.y.z
+```
+
+- `--no-reboot`：完成优化后不自动重启
+- `--dry-run`：只做环境预检和动作预览，不执行内核安装及系统写入
+- `VERSION_PIN=x.y.z`：锁定指定内核版本，格式必须是数字版本号
+
+内核包下载失败、SHA256SUMS 缺失或校验失败时，脚本会中止，不会无校验安装。
+
+### 第三步：重连后部署 sing-box
+
+服务器重启后重新 SSH 登录，然后执行：
+
+```bash
+bash deploy_singbox.sh
+```
+
+它会依次尝试完成：
+
+1. 下载并校验固定提交的外部管理脚本
+2. 自动安装 sing-box
+3. 生成 Clash/Mihomo、Sing-box 和通用聚合订阅
+4. 配置 Hysteria2 端口跳跃：`40000-42000`
+5. 配置 Tuic5 端口跳跃：`43000-45000`
+6. 创建独立端口跳跃链 `ACVPN_PORTHOP`
+7. 配置 Argo 临时隧道
+8. 配置 Argo 保活和订阅刷新
+9. 配置 WARP 域名分流
+10. 创建独立防探测链 `ACVPN_ANTIPROBE`
+11. 启动订阅 HTTP 服务
+12. 在终端打印最终订阅链接
+
+支持：
+
+```bash
+bash deploy_singbox.sh --help
+bash deploy_singbox.sh --dry-run
+VMESS_LOCK=on bash deploy_singbox.sh
+VMESS_LOCK=off bash deploy_singbox.sh
+```
+
+`VMESS_LOCK` 默认是 `on`：明文 VMess 端口不直接暴露公网，仅允许 Argo 回环入口。只有明确需要时才使用 `off`。
 
 ---
 
-## 装了什么
+## 网络优化具体做了什么
 
-| 做好的事情 | 你得到什么 |
-|---|---|
-| BBRv3 内核 + 网络参数调优 | 延迟更低、吞吐更大；缓冲区/连接跟踪表按内存自动分级（小内存防 OOM） |
-| ethtool 网卡深度优化 | 环形缓冲 4096、硬件卸载（含 UDP 分段）、中断合并 16us；不支持自动跳过 |
-| VLESS / VMess / Hysteria2 / Tuic5 / AnyTLS | 五协议同时在线，客户端任选 |
-| Hysteria2(40000-42000) + Tuic5(43000-45000) 端口跳跃 | ISP 限制 UDP 端口时更难封锁 |
-| Argo 临时隧道 | Cloudflare CDN 转发隐藏 IP；QUIC 优先自动回退；保活 watchdog 掉线自动拉起 |
-| WARP 域名分流 | ChatGPT / Netflix / Google 等走 WARP 出口，解锁流媒体 |
-| 订阅链接 | Clash YAML + Sing-box JSON + 通用聚合 |
-| **独立防火墙链** | 全部 vpnplus 规则收敛到 `ACVPN_ANTIPROBE` / `ACVPN_PORTHOP` 命名链，主链仅一条跳转；重跑/卸载只删自己的链，第三方规则零触碰 |
-| **外部脚本锁定** | `sb.sh` 固定 commit `5001e76` + SHA256 强制校验 |
-| **安全默认** | 明文 VMess 端口默认封锁公网（`VMESS_LOCK=on`），仅 Argo 回环可达 |
-| **精确进程清理** | busybox 按端口定位停止，绝不 `pkill -x busybox` 杀全局 |
-| **网络感知加固** | 仅当无 IPv6 地址才关闭 RA，避免破坏依赖 RA 获址的 VPS |
-| 部署清单 | 每次安装把来源/版本/校验值写入 `/var/log/vpnplus-*-manifest.log` 供审计 |
+### BBR 与 fq
 
-> 全部参数持久化（`/etc/sysctl.d/`、systemd drop-in），重启不丢。
+配置并尝试加载：
 
----
-
-## 怎么管理
-
-部署完后用 `sb` 命令管理一切（换端口、换协议、刷新订阅 Token、开关 Argo、更新内核）。
-
-一键验证部署：
-
-```bash
-SERVER_IP=你的IP bash <(curl -fsSL https://raw.githubusercontent.com/ccAzy/vpnplus/main/verify.sh)
+```text
+modprobe tcp_bbr
+net.ipv4.tcp_congestion_control = bbr
+net.core.default_qdisc = fq
 ```
 
-自动检查 BBRv3 内核、进程、端口、**独立防火墙链**、Argo 隧道、订阅、域名分流。
+同时运行时对默认网卡执行 `tc qdisc replace ... root fq`。
 
-彻底卸载：
+### TCP/UDP 参数
 
-```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/ccAzy/vpnplus/main/cleanup.sh)
+包括：
+
+- TCP/UDP 读写缓冲区
+- `tcp_mem` 内存页分级
+- TCP 自动接收缓冲
+- TCP metrics 策略
+- 输出队列限制
+- TCP Fast Open
+- keepalive
+- 丢包恢复和 SACK 相关参数
+- `netdev_max_backlog`、`somaxconn`、SYN backlog
+
+`tcp_mem` 会根据内存分级，避免把小内存 VPS 配置成不合理的超大 TCP 内存上限。
+
+### 多队列与网卡
+
+第一次部署和每次开机都会尝试：
+
+- ethtool 环形缓冲
+- TSO/GSO/GRO
+- UDP 分段卸载
+- 中断合并
+- 所有 RX 队列的 RPS
+- 所有 TX 队列的 XPS
+- 按 CPU 数量生成 CPU mask
+- 默认网卡 fq 队列
+
+持久化文件：
+
+```text
+/usr/local/sbin/vpnplus-net-tuning.sh
+/etc/systemd/system/vpnplus-net-tuning.service
 ```
 
-清除 sing-box / Argo / 端口跳跃 / 订阅 / 部署标记，**只清理 vpnplus 自己的独立防火墙链**，并自动备份原规则到 `/var/backups/vpnplus/`。
+可用以下命令查看：
+
+```bash
+systemctl status vpnplus-net-tuning.service
+journalctl -u vpnplus-net-tuning.service --no-pager
+```
+
+不支持的网卡能力会被跳过并给出提示；不同 VPS 的虚拟网卡、CPU 数量和队列数不同，实际收益需要测速确认。
 
 ---
 
-## 相对 ACVPN 的安全加固清单
+## 部署后验证
 
-1. **防火墙独立命名链** — 旧版按 `limit: above` / `#conn` 全局匹配删除 INPUT 规则，可能误删 fail2ban / Docker 等第三方规则；现改为独立链 `ACVPN_ANTIPROBE`（filter INPUT）+ `ACVPN_PORTHOP`（nat PREROUTING），主链仅一条跳转，清理只删自己的链。
-2. **外部脚本强制校验** — 旧版 `curl 分支/sb.sh | install` 无校验；现锁定 commit `5001e76` + SHA256，失败即中止。
-3. **内核强制校验** — 旧版 SHA256SUMS 缺失时降级"仅警告后照装"；现校验缺失/失败一律中止（内核为最高权限组件）。
-4. **核心/可选失败语义** — 核心步骤（安装/订阅/Argo）失败不再用 `|| true` 吞掉，未完全成功不写部署标记。
-5. **精确进程清理** — `pkill -x busybox` 改为按监听端口定位 PID 停止。
-6. **安全默认收紧** — `VMESS_LOCK` 默认 `on`（旧版默认 off 暴露明文端口）。
-7. **网络感知 sysctl** — `accept_ra` 仅当无 IPv6 地址才关闭。
-8. **set -e 边界** — crontab/grep 命令替换统一 `|| true`，杜绝静默提前退出。
-9. **dry-run + 备份** — 两个部署脚本与清理脚本都支持 `--dry-run`；清理前自动备份防火墙规则。
+本机验证：
+
+```bash
+bash verify.sh
+```
+
+从外部地址验证订阅：
+
+```bash
+SERVER_IP="你的服务器IP" bash verify.sh
+```
+
+验证内容包括：
+
+- `sb` 命令和 sing-box 二进制
+- `/etc/s-box` 配置目录
+- BBRv3 模块提示
+- sing-box 进程
+- TCP/UDP 监听端口
+- `ACVPN_PORTHOP` 端口跳跃链
+- `ACVPN_ANTIPROBE` 防探测链
+- Argo URL 和 HTTP 端点
+- 三种订阅格式的 HTTP 状态
+- 域名分流文件和规则数量
+
+最终会输出通过/失败数量；存在失败项时退出码为 `1`。
+
+注意：本机验证主要检查 `127.0.0.1`；要验证公网访问，必须传入 `SERVER_IP`。
 
 ---
 
-## 遇到问题
+## 管理与审计
 
-### 第 1 步报错 "BBRv3 下载失败 / SHA256 校验失败"
+部署完成后可以使用外部管理命令：
 
-**检查 /boot 空间**（需 >200MB）：
+```bash
+sb
+```
+
+常见管理内容包括：
+
+- 更换端口
+- 更换协议
+- 刷新订阅 Token
+- 开关 Argo
+- 更新或重配 sing-box
+- 配置订阅和域名分流
+
+审计日志：
+
+```text
+/var/log/vpnplus-optimize.log
+/var/log/vpnplus-optimize-manifest.log
+/var/log/vpnplus-singbox-manifest.log
+```
+
+清单会记录内核来源、版本、SHA256、外部脚本校验结果和部署状态。
+
+---
+
+## 安全清理
+
+交互式清理：
+
+```bash
+bash cleanup.sh
+```
+
+非交互清理：
+
+```bash
+bash cleanup.sh --force
+```
+
+只预览：
+
+```bash
+bash cleanup.sh --force --dry-run
+```
+
+清理前会备份防火墙规则到：
+
+```text
+/var/backups/vpnplus/
+```
+
+清理范围包括：
+
+- sing-box、Argo 和 vpnplus 网络调优服务
+- 订阅 BusyBox httpd
+- vpnplus 自己的 cron 条目
+- vpnplus 自己的 systemd unit
+- `/etc/s-box`、订阅文件和部署标记
+- vpnplus 写入的 sysctl 文件
+- `ACVPN_ANTIPROBE`、`ACVPN_PORTHOP`、`ACVPN_RSS` 独立链
+- vpnplus 相关 nftables 表
+
+不会按通用关键词全局删除第三方防火墙规则，也不会全局杀掉所有 busybox 进程。
+
+---
+
+## 故障排查
+
+### BBRv3 下载或校验失败
+
+先检查：
+
 ```bash
 df -h /boot
-dpkg --list | grep linux-image | awk '{print $2}'
-apt-get autoremove --purge -y
+dpkg --list | grep linux-image
 ```
-然后删标记重跑：
+
+然后可以锁定一个已知版本重试：
+
 ```bash
 rm -f /etc/.vpnplus-optimized
-bash <(curl -fsSL https://raw.githubusercontent.com/ccAzy/vpnplus/main/deploy_optimize.sh)
+bash deploy_optimize.sh VERSION_PIN=x.y.z
 ```
-> SHA256 校验失败通常意味着下载损坏或被篡改，**不应绕过**。若持续失败，用 `VERSION_PIN=x.y.z` 指定版本重试。
 
-### 新内核启动不了
+不要绕过 SHA256 校验。
 
-重启时 VNC 连上服务器，grub 菜单选旧内核。进系统后：
+### 新内核启动失败
+
+通过 VPS 控制台/VNC 选择旧内核进入系统，然后删除标记：
+
 ```bash
 rm -f /etc/.vpnplus-optimized
 ```
-下次重跑会尝试最新版内核。
 
-### 协议连不上
+确认 `/etc/default/grub` 和 `/boot` 状态后再重试。
 
-```bash
-reboot     # 先重启，多数情况解决
-# 如果还不行：
-pgrep -f sing-box                 # 进程在不在
-ss -tlnp | grep sing-box          # TCP 端口
-ss -ulnp | grep sing-box          # UDP 端口
-journalctl -u sb -n 50 --no-pager # 日志
-```
-
-### Argo 隧道不启动
+### 协议无法连接
 
 ```bash
-cat /etc/s-box/argo.log | grep trycloudflare   # 看有没有 URL
-printf "3\n3\n1\n1\n" | sb                      # 手动重配
+pgrep -af sing-box
+ss -tlnp | grep sing-box
+ss -ulnp | grep sing-box
+journalctl -u sb -n 100 --no-pager
+bash verify.sh
 ```
 
-### 强制重装
+如果只有公网访问失败，重点检查：
+
+- 云厂商安全组
+- VPS 防火墙
+- 运营商 TCP/UDP 限制
+- 端口跳跃范围
+- Argo 状态
+- IPv4/IPv6 路由
+
+### 订阅无法更新
 
 ```bash
-rm -f /etc/.vpnplus-optimized /etc/.vpnplus-singbox
+cat /etc/s-box/subport.log
+cat /etc/s-box/subtoken.log
+ss -tlnp | grep busybox
+curl -v http://127.0.0.1:订阅端口/token/clmi.yaml
+systemctl status vpnplus-net-tuning.service
 ```
-然后重新执行第 1、2 步。
+
+移动网络可能拦截高端口 HTTP 订阅；这种情况优先使用 Argo/HTTPS 入口，而不是反复重装 sing-box。
 
 ---
 
-## 致谢
+## 已知限制
 
-- [yonggekkk/sing-box-yg](https://github.com/yonggekkk/sing-box-yg) — sing-box 管理脚本
-- [ccAzy/ACVPN](https://github.com/ccAzy/ACVPN) — 基础部署框架
-- [byJoey/Actions-bbr-v3](https://github.com/byJoey/Actions-bbr-v3) — BBRv3 自动编译内核
-- [Cloudflare](https://www.cloudflare.com/) — Argo 隧道
+- Private GitHub 仓库不能被 VPS 匿名 `curl` 读取；需要先上传代码或使用已认证的 Git 访问。
+- BBRv3 内核安装依赖目标架构、发行版、`/boot` 空间和外部 Release 可用性。
+- Argo 临时隧道没有固定 SLA，适合临时入口，不等于永久稳定线路。
+- WARP、域名分流和 Argo 属于增强功能，失败时不一定代表核心 sing-box 部署失败。
+- `ethtool`、RPS/XPS 和 fq 的效果取决于 VPS 虚拟网卡、CPU、宿主机和运营商线路。
+- Swap 不会直接提升网速；如需增加 Swap，应把它作为小内存 VPS 的防 OOM 选项，而不是网络加速开关。
+- 脚本已完成本地语法、ShellCheck 和生成脚本检查；完整 BBRv3、sing-box、Argo、WARP、客户端连通性仍需在真实 VPS 上端到端验证。
+
+---
+
+## 许可证
+
+GPLv3

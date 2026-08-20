@@ -12,8 +12,8 @@ description: >
 | 文件 | 用途 |
 |------|------|
 | `SKILL.md` | 本文件 — 完整部署指南 |
-| `bootstrap.sh` | **第0步** — 基础依赖安装与环境检查（不改防火墙/不重启） |
-| `deploy_optimize.sh` | **第1步** — BBRv3 强制校验 + 网络暴力优化 + 自动重启 |
+| `bootstrap.sh` | **部署前置** — 基础依赖安装与环境检查（不改防火墙/不重启） |
+| `deploy_optimize.sh` | **第1步** — BBRv3 强制校验 + TCP/UDP + ethtool + 动态 RPS/XPS/fq + 自动重启 |
 | `deploy_singbox.sh` | **第2步** — sing-box 部署（独立防火墙链 + 订阅 + Argo + WARP） |
 | `cleanup.sh` | 独立清理脚本（只删 vpnplus 自己的防火墙链，自动备份） |
 | `verify.sh` | 部署后验证（进程/端口/独立链/Argo/订阅/域名分流） |
@@ -29,9 +29,9 @@ description: >
 7. **网络感知 sysctl**：仅当无 IPv6 全局地址才关 `accept_ra`。
 8. **dry-run + 备份**：两部署脚本 + cleanup 均支持 `--dry-run`；cleanup 前自动备份规则到 `/var/backups/vpnplus/`。
 
-## 部署流程（四步）
+## 部署流程（从第一步开始）
 
-### 第 0 步：准备环境
+### 部署前置：准备环境
 
 ```bash
 bash bootstrap.sh
@@ -43,9 +43,9 @@ bash bootstrap.sh --dry-run
 
 `bootstrap.sh` 只检查/安装 Debian/Ubuntu 基础工具：`curl`、`jq`、`git`、`xz-utils`、`tmux`、`iproute2`、`iptables`、`procps`、`psmisc`、`util-linux`、`cron`、`ethtool`、`kmod`、`ca-certificates`。其中 `git`/`xz-utils` 供 Hermes 安装器使用，`tmux` 用于 SSH 断开后保持 Agent 会话。不装内核、不改防火墙、不写 sing-box 配置、不重启。
 
-> 第 0 步本身需要 curl。极简 VPS 没有 curl 时，先执行：
+> 部署前置本身需要 curl。极简 VPS 没有 curl 时，先执行：
 > `apt-get update && apt-get install -y curl`
-> 跳过第 0 步也可以：两个部署脚本会各自兜底安装依赖。
+> 跳过部署前置也可以：两个部署脚本会各自兜底安装依赖。
 
 ### 第 1 步：暴力优化 + BBRv3（强制校验） + 重启
 
@@ -56,7 +56,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/ccAzy/vpnplus/main/deploy_op
 自动完成：
 1. 清理旧 sing-box 残留（保留已部署的 /etc/s-box）
 2. 安装 BBRv3 内核（**SHA256 强制校验**，缺失/失败即中止）
-3. 应用网络暴力优化（TCP/UDP 缓冲、RSS 多队列、ethtool 深度优化，按内存分级防 OOM）
+3. 应用网络优化（TCP/UDP 缓冲、BBR/fq、所有 RX/TX 队列的 RPS/XPS、ethtool，按内存分级防 OOM）
 4. 提升系统资源限制（nofile/nproc）
 5. 校验 GRUB 默认引导新内核
 6. 10 秒后自动重启（`--no-reboot` 可跳过）
@@ -87,7 +87,7 @@ reboot
 ```
 重启后等待 1-2 分钟，重新测试协议。
 
-## 第零步：彻底清除旧安装
+## 部署前清理旧安装
 
 ```bash
 bash cleanup.sh          # 交互式（需确认）
@@ -95,7 +95,7 @@ bash cleanup.sh --force  # 非交互
 bash cleanup.sh --dry-run # 预览
 ```
 
-> cleanup 只删 vpnplus 自己的 `ACVPN_ANTIPROBE`/`ACVPN_PORTHOP`/`ACVPN_RSS` 链，并自动备份原规则到 `/var/backups/vpnplus/`。crontab/grep 用 `|| true` 防 set -e 静默退出。
+> cleanup 只删 vpnplus 自己的 `ACVPN_ANTIPROBE`/`ACVPN_PORTHOP`/`ACVPN_RSS` 链，并清理 `vpnplus-net-tuning.service` 与其调优脚本；自动备份原规则到 `/var/backups/vpnplus/`。crontab/grep 用 `|| true` 防 set -e 静默退出。
 
 ## 部署后验证
 

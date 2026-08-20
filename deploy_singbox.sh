@@ -111,11 +111,15 @@ check_env() {
     done
     if [ "${#missing[@]}" -gt 0 ]; then
         info "缺少第二阶段依赖: ${missing[*]}"
-    DEBIAN_FRONTEND=noninteractive apt-get update -qq || { fail "apt-get update 失败，检查软件源/网络"; return 1; }
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${missing[@]}" || { fail "依赖安装失败: ${missing[*]}"; return 1; }
-        ok "第二阶段基础依赖安装完成"
+        if $DRY_RUN; then
+            info "[dry-run] apt-get update && apt-get install -y ${missing[*]}"
+        else
+            DEBIAN_FRONTEND=noninteractive apt-get update -qq || { fail "apt-get update 失败，检查软件源/网络"; return 1; }
+            DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${missing[@]}" || { fail "依赖安装失败: ${missing[*]}"; return 1; }
+            ok "第二阶段基础依赖安装完成"
+        fi
     fi
-    for cmd in curl jq ip ss iptables systemctl crontab pgrep pkill timeout sha256sum sysctl; do
+    for cmd in curl jq git xz tmux ip ss iptables systemctl crontab pgrep pkill timeout sha256sum sysctl; do
         command -v "$cmd" >/dev/null 2>&1 || { fail "关键命令缺失: $cmd，请先执行 bootstrap.sh"; return 1; }
     done
     if ! command -v systemctl &>/dev/null; then fail "无 systemd，sing-box 需要 systemd"; return 1; fi
@@ -311,10 +315,12 @@ EOSUB
 # ── 安全加固（网络感知：IPv6 无地址才关 RA；rp_filter 可覆盖） ──
 apply_hardening() {
     local conf="/etc/sysctl.d/99-vpnplus-security.conf"
-    local v6_ra=""
+    local v6_ra_lines
     # 检测本机是否有 IPv6 地址（无 v6 才关 RA，避免破坏依赖 RA 获址的 VPS）
     if ! ip -6 addr show scope global 2>/dev/null | grep -q 'inet6'; then
-        v6_ra="1"
+        v6_ra_lines=$'net.ipv6.conf.all.accept_ra = 0\nnet.ipv6.conf.default.accept_ra = 0'
+    else
+        v6_ra_lines='# 检测到 IPv6 地址，保留 RA 以防破坏 v6 网络配置'
     fi
     run bash -c "cat > '$conf' <<'SEC'
 # vpnplus 安全加固（网络感知生成）
@@ -329,7 +335,7 @@ net.ipv4.conf.all.send_redirects = 0
 net.ipv4.conf.default.send_redirects = 0
 net.ipv4.icmp_echo_ignore_broadcasts = 1
 net.ipv4.icmp_ignore_bogus_error_responses = 1
-$( [ \"\$v6_ra\" = \"1\" ] && printf 'net.ipv6.conf.all.accept_ra = 0\\nnet.ipv6.conf.default.accept_ra = 0\\n' || printf '# 检测到 IPv6 地址，保留 RA 以防破坏 v6 网络配置\\n' )
+$v6_ra_lines
 net.ipv6.conf.all.accept_redirects = 0
 net.ipv6.conf.default.accept_redirects = 0
 net.ipv6.conf.all.accept_source_route = 0
@@ -399,7 +405,7 @@ exit 0
 KEEP"
     run chmod +x /usr/local/sbin/vpnplus-argo-keepalive.sh
     if ! $DRY_RUN; then
-        ( crontab -l 2>/dev/null | grep -v 'vpnplus-argo-keepalive' | grep -v 'acvpn-argo-keepalive'; echo '*/3 * * * * /usr/local/sbin/vpnplus-argo-keepalive.sh > /dev/null 2>&1' ) | crontab - 2>/dev/null || true
+        ( crontab -l 2>/dev/null | grep -vE 'vpnplus-argo-keepalive|acvpn-argo-keepalive'; echo '*/3 * * * * /usr/local/sbin/vpnplus-argo-keepalive.sh > /dev/null 2>&1' ) | crontab - 2>/dev/null || true
     else
         info "[dry-run] 写入 cron: vpnplus-argo-keepalive 每3分钟"
     fi
@@ -413,7 +419,7 @@ ensure_sub_httpd() {
     [ -z "$port" ] && { warn "无法获取订阅端口，跳过订阅服务保障"; return 1; }
     command -v busybox >/dev/null 2>&1 || { warn "busybox 不可用，跳过订阅服务保障"; return 1; }
     if ! $DRY_RUN; then
-        ( crontab -l 2>/dev/null | grep -v 'busybox httpd'; echo "@reboot sleep 10 && /bin/bash -c \"busybox httpd -f -p $(cat /etc/s-box/subport.log 2>/dev/null) -h /root/websbox > /dev/null 2>&1 &\"" ) | crontab - 2>/dev/null || true
+        ( crontab -l 2>/dev/null | grep -vE 'busybox httpd.*(/root/websbox|subport.log)'; echo "@reboot sleep 10 && /bin/bash -c \"busybox httpd -f -p $(cat /etc/s-box/subport.log 2>/dev/null) -h /root/websbox > /dev/null 2>&1 &\"" ) | crontab - 2>/dev/null || true
     else
         info "[dry-run] 写入 @reboot 订阅服务自启"
     fi
@@ -433,6 +439,35 @@ ensure_sub_httpd() {
         fi
         ss -tln 2>/dev/null | grep -q ":$port" && ok "订阅 HTTP 服务已启动" || warn "订阅 HTTP 服务启动失败，请手动检查"
     fi
+}
+
+# ── 最终显示订阅链接 ──
+show_subscription() {
+    local sub_port token public_ip
+    sub_port=$(get_sub_port 2>/dev/null || true)
+    if [ -z "$sub_port" ] || [ ! -f /etc/s-box/subtoken.log ]; then
+        warn "订阅链接未生成：缺少订阅端口或 token"
+        return 1
+    fi
+    token=$(tr -cd 'a-zA-Z0-9_-' < /etc/s-box/subtoken.log 2>/dev/null || true)
+    [ -n "$token" ] || { warn "订阅 token 为空，无法生成链接"; return 1; }
+    public_ip=$(curl -fsSL --max-time 5 https://api.ipify.org 2>/dev/null \
+        || curl -fsSL --max-time 5 https://icanhazip.com 2>/dev/null \
+        || echo "你的服务器IP")
+    echo ""
+    info "━━━ 订阅链接 ━━━"
+    echo ""
+    echo "Clash / Mihomo:"
+    echo "http://${public_ip}:${sub_port}/${token}/clmi.yaml"
+    echo ""
+    echo "Sing-box:"
+    echo "http://${public_ip}:${sub_port}/${token}/sbox.json"
+    echo ""
+    echo "通用聚合:"
+    echo "http://${public_ip}:${sub_port}/${token}/jhsub.txt"
+    echo ""
+    warn "订阅链接使用 HTTP + IP:端口；移动网络可能拦截高端口，必要时改用 Argo/HTTPS 入口。"
+    return 0
 }
 
 # ── 防主动探测（独立命名链；重跑/卸载只动 ACVPN_ANTIPROBE，绝不 delete 全局 INPUT 规则） ──
@@ -536,6 +571,12 @@ main() {
     fi
 
     check_env || return 1
+    if $DRY_RUN; then
+        echo -e "${YELLOW}═══ DRY-RUN 模式：仅预览，不修改系统 ═══${N}"
+        info "[dry-run] 将执行：安装 sb.sh、生成订阅、配置端口跳跃、Argo、独立防火墙链、WARP"
+        info "[dry-run] 已跳过实际文件、服务、防火墙和进程检查"
+        return 0
+    fi
     local DEPLOY_OK=true
 
     step "1" "安装 sing-box"
@@ -561,6 +602,7 @@ main() {
     step "6" "WARP + 域名分流（可选）"
     setup_warp
     setup_domain_routing
+    show_subscription || true
 
     # 仅核心成功才写成功标记
     if $DEPLOY_OK; then

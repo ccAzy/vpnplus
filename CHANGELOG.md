@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-08-20 — 全项目流程与逻辑审查修复
+
+- README/SKILL 改为“部署前置 + 第一/二/三步”，不再把环境准备写成“第零步”。
+- 修复 `deploy_optimize.sh` 与 `deploy_singbox.sh` 的 dry-run：预览模式不再继续检查不存在的真实产物，也不执行系统写入/服务/防火墙/重启。
+- 修复 `bootstrap.sh`：`git`、`xz-utils`、`tmux` 现在同时进入包状态检查和命令可用性检查，不再出现“列在清单但漏检”。
+- 修复 `deploy_singbox.sh` 重写时遗漏的最终订阅链接输出（Clash/Mihomo、Sing-box、通用聚合）。
+- 收紧 cleanup：不再全局杀 busybox；cron 只过滤 vpnplus/旧 ACVPN 自己的路径；未确认归属的 cloudflared systemd unit 和 nftables sing-box 表保留不动。
+- cleanup 增加独立防火墙链清理结果验证。
+- 增加 HTTP 高端口订阅链接的移动网络拦截提示。
+- 增加已知限制：Private 仓库的匿名 raw 安装命令会返回 404；完整链路仍需真实 VPS 端到端验证。
+
 ## 2026-08-20 — 环境准备优化
 
 - 新增 `bootstrap.sh`：统一检查/安装 Debian/Ubuntu 基础依赖，不装内核、不改防火墙、不重启。

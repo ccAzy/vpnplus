@@ -117,7 +117,7 @@ clean_chains() {
 # （与 ACVPN 相同，但 crontab 处理修复了 set -e 退出问题）
 stop_services() {
     echo "--- 停止服务 ---"
-    for svc in sing-box cloudflared cloudflared-update acvpn-rss; do
+    for svc in sing-box cloudflared cloudflared-update acvpn-rss vpnplus-net-tuning; do
         if systemctl is-active "$svc" &>/dev/null; then
             run systemctl stop "$svc" || true; ok "已停止服务: $svc"
         fi
@@ -136,19 +136,34 @@ kill_procs() {
     echo "--- 终止进程 ---"
     run pkill -15 -f sing-box || true
     sleep 2
-    for proc in sing-box 'cloudflared.*tunnel.*url.*localhost' busybox; do
+    for proc in sing-box 'cloudflared.*tunnel.*url.*localhost'; do
         if pgrep -f "$proc" &>/dev/null; then
             run pkill -9 -f "$proc" || true; ok "已终止: $proc"
         fi
     done
 }
 
+# 精确停止 vpnplus 订阅端口对应的 busybox httpd，不按进程名全局杀进程。
+kill_sub_httpd() {
+    local port pids
+    [ -f /etc/s-box/subport.log ] || return 0
+    port=$(grep -oE '[0-9]{1,5}' /etc/s-box/subport.log 2>/dev/null | head -1 || true)
+    [ -n "$port" ] || return 0
+    pids=$(ss -tlnp 2>/dev/null | grep ":$port " | grep -oE 'pid=[0-9]+' | sed 's/pid=//' | sort -u || true)
+    for p in $pids; do
+        if tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null | grep -qE 'busybox[[:space:]]+httpd.*(/root/websbox|subport.log)'; then
+            run kill -TERM "$p" || true
+            ok "已终止 vpnplus 订阅 httpd (PID $p, 端口 $port)"
+        fi
+    done
+}
+
 clean_crontab() {
-    echo "--- 清理 crontab（仅 sb 相关条目） ---"
+    echo "--- 清理 crontab（仅 vpnplus 自己的条目和明确的旧 ACVPN 兼容条目） ---"
     if crontab -l &>/dev/null; then
         BEFORE=$(crontab -l 2>/dev/null | wc -l)
         # 修复 set -e 问题：grep 无匹配时返回 1，必须 || true 防静默退出
-        NEW_CRON=$(crontab -l 2>/dev/null | grep -vE 'sing-box|cloudflared|argo|busybox|websbox|/usr/bin/sb' || true)
+        NEW_CRON=$(crontab -l 2>/dev/null | grep -vE 'vpnplus-argo-keepalive|acvpn-argo-keepalive|/usr/bin/sb|busybox httpd.*(/root/websbox|subport.log)' || true)
         if $DRY_RUN; then
             info "[dry-run] 过滤 crontab（移除 ${BEFORE} 行中的 sb 相关条目）"
         elif [ -z "$NEW_CRON" ]; then
@@ -166,24 +181,31 @@ clean_crontab() {
 
 rm_units() {
     echo "--- 清理 systemd units ---"
-    local COUNT=0
+    local COUNT=0 unit
     for unit in /etc/systemd/system/sing-box.service \
                 /etc/systemd/system/cloudflared.service \
                 /etc/systemd/system/cloudflared-update.service \
                 /etc/systemd/system/cloudflared-update.timer \
-                /etc/systemd/system/acvpn-rss.service; do
+                /etc/systemd/system/acvpn-rss.service \
+                /etc/systemd/system/vpnplus-net-tuning.service; do
         if [ -f "$unit" ]; then
-            run rm -f "$unit"; COUNT=$((COUNT + 1))
+            # 只删除明确属于 vpnplus/旧 ACVPN 的 unit；不因同名而删除其他 cloudflared 服务。
+            if [ "$(basename "$unit")" = "acvpn-rss.service" ] || grep -qE '/etc/s-box|/root/websbox|vpnplus|ACVPN' "$unit" 2>/dev/null; then
+                run rm -f "$unit"; COUNT=$((COUNT + 1))
+            else
+                warn "保留未确认归属的 unit: $unit"
+            fi
         fi
     done
     run systemctl daemon-reload || true
-    [ $COUNT -gt 0 ] && ok "已删除 ${COUNT} 个 systemd unit 文件" || info "无 unit 文件需清理"
+    [ $COUNT -gt 0 ] && ok "已删除 ${COUNT} 个 vpnplus systemd unit 文件" || info "无 vpnplus unit 文件需清理"
 }
 
 rm_files() {
     echo "--- 清理文件和目录 ---"
     local COUNT=0
-    for path in /etc/s-box /usr/bin/sb /root/websbox /usr/local/sbin/acvpn-argo-keepalive.sh; do
+    for path in /etc/s-box /usr/bin/sb /root/websbox /usr/local/sbin/acvpn-argo-keepalive.sh \
+                /usr/local/sbin/vpnplus-net-tuning.sh; do
         if [ -e "$path" ]; then
             run rm -rf "$path"; COUNT=$((COUNT + 1)); ok "已删除: $path"
         fi
@@ -208,14 +230,23 @@ clean_sysctl() {
 clean_nft() {
     echo "--- 清理 nftables（仅 vpnplus 表） ---"
     if command -v nft >/dev/null 2>&1; then
-        run nft delete table inet sing-box 2>/dev/null
-        run nft delete table inet vpnplus 2>/dev/null
-        # 重新持久化：仅当 nftables.conf 存在时重写（保留 systemd 默认 includes）
+        # 只有检测到 vpnplus/旧 ACVPN 的部署痕迹时才删除通用 sing-box 表，
+        # 避免清理另一套独立 sing-box 实例。
+        if [ -f /etc/.vpnplus-singbox ] || [ -f /etc/.ACVPN-singbox ] || [ -d /etc/s-box ]; then
+            run nft delete table inet sing-box 2>/dev/null
+            run nft delete table inet vpnplus 2>/dev/null
+        else
+            info "未确认 nftables sing-box 表归属，保留不动"
+        fi
     fi
 }
 
 # ———————— 验证 ————————
 verify_clean() {
+    if $DRY_RUN; then
+        info "[dry-run] 跳过清理结果验证（未执行实际删除）"
+        return 0
+    fi
     echo ""
     echo "========================================="
     echo "  验证清理结果"
@@ -223,7 +254,12 @@ verify_clean() {
     local PASS=0 FAIL=0
     if ! systemctl is-active sing-box &>/dev/null && [ ! -f /etc/systemd/system/sing-box.service ]; then ok "sing-box 服务已清除"; PASS=$((PASS+1)); else warn "sing-box 服务仍存在"; FAIL=$((FAIL+1)); fi
     [ ! -d /etc/s-box ] && { ok "/etc/s-box 已删除"; PASS=$((PASS+1)); } || { warn "/etc/s-box 仍存在"; FAIL=$((FAIL+1)); }
-    if crontab -l 2>/dev/null | grep -qE 'sing-box|cloudflared|argo' 2>/dev/null; then
+    if iptables -L "$CHAIN_ANTIPROBE" -n >/dev/null 2>&1 || iptables -t nat -L "$CHAIN_PORTHOP" -n >/dev/null 2>&1; then
+        warn "vpnplus 独立防火墙链仍存在"; FAIL=$((FAIL+1))
+    else
+        ok "vpnplus 独立防火墙链已清除"; PASS=$((PASS+1))
+    fi
+    if crontab -l 2>/dev/null | grep -qE 'vpnplus-argo-keepalive|acvpn-argo-keepalive|/usr/bin/sb|busybox httpd.*(/root/websbox|subport.log)' 2>/dev/null; then
         warn "crontab 残留 sb 条目"; FAIL=$((FAIL+1))
     else
         ok "crontab 无 sb 条目"; PASS=$((PASS+1))
@@ -243,6 +279,7 @@ bak_firewall
 clean_chains
 stop_services
 kill_procs
+kill_sub_httpd
 clean_crontab
 rm_units
 rm_files
