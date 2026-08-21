@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-08-21 — 逻辑审查修复（三处）
+
+- 修复 `deploy_singbox.sh` 端口跳跃启用条件：`&&`/`||` 同优先级左结合导致只装 Hysteria2（无 Tuic）时整条 `ACVPN_PORTHOP` 链被静默跳过；改为显式分组 `{ ...; } || { ...; }`，单协议/双协议/双缺失四象限实测验证。
+- 修复 `deploy_optimize.sh` 两处 `set -e` 中断路径：`apply_ethtool`、`ensure_grub_boot` 存在 `return 1` 分支却被裸调用，一旦触发会中止整个脚本（跳过资源限制、多队列持久化、成功标记与重启）；改为 `|| warn` 降级继续。
+- 修复 `verify.sh` 与文档不一致：README/SKILL 教的 `SERVER_IP=x.x.x.x bash verify.sh` 环境变量用法此前不生效（脚本只读 `$1`）；现在两种传参方式均支持。
+
 ## 2026-08-20 — 全项目流程与逻辑审查修复
 
 - README/SKILL 改为“部署前置 + 第一/二/三步”，不再把环境准备写成“第零步”。

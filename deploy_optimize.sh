@@ -512,13 +512,13 @@ fi
 
 step "3" "网络暴力优化"
 apply_sysctl
-apply_ethtool
+apply_ethtool || warn "ethtool 优化已跳过（可选步骤，不影响后续步骤）"
 apply_qdisc || true
 boost_limits
 apply_rss
 
 if $BBR_OK; then
-    ensure_grub_boot
+    ensure_grub_boot || warn "GRUB 默认引导项未确认；若重启后进入旧内核请手动处理"
     run touch "$MARK"
     manifest "optimize mark written; kernel=$CUR_KERNEL"
     step "4" "重启生效"

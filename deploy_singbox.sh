@@ -202,7 +202,7 @@ config_port_hopping() {
         run ip6tables -t nat -X "$CHAIN_PORTHOP" 2>/dev/null || true
     fi
 
-    if [ -n "$HY_PORT" ] && [ "$HY_PORT" != "null" ] || [ -n "$TU_PORT" ] && [ "$TU_PORT" != "null" ]; then
+    if { [ -n "$HY_PORT" ] && [ "$HY_PORT" != "null" ]; } || { [ -n "$TU_PORT" ] && [ "$TU_PORT" != "null" ]; }; then
         run iptables -t nat -N "$CHAIN_PORTHOP" 2>/dev/null || true
         if [ -n "$HY_PORT" ] && [ "$HY_PORT" != "null" ]; then
             run iptables -t nat -A "$CHAIN_PORTHOP" -p udp --dport 40000:42000 -j DNAT --to-destination :"$HY_PORT"
