@@ -1,4 +1,5 @@
 #!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-only
 # ===================================================================
 # vpnplus — sing-box 彻底清理脚本
 # 清除 sing-box / cloudflared(argo) / busybox / crontab / iptables(仅ACVPN链) / nftables

@@ -1,4 +1,5 @@
 #!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-only
 # ===================================================================
 # vpnplus — sing-box VPN 一键部署（需先执行 deploy_optimize.sh）
 # 用法: curl -fsSL .../deploy_singbox.sh | bash

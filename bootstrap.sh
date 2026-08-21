@@ -1,4 +1,5 @@
 #!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-only
 # ===================================================================
 # vpnplus — 环境准备与依赖检查
 # 用法: bash bootstrap.sh [--dry-run] [--check-only]
