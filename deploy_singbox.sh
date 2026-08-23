@@ -12,7 +12,7 @@
 #   4. 进程清理精确化：busybox 用端口查找，绝不 pkill -x busybox 杀全局
 #   5. 安全参数网络感知：IPv6 若无地址才关 RA，rp_filter 可覆盖
 # ===================================================================
-set -uo pipefail
+set -euo pipefail
 
 DRY_RUN=false
 VMESS_LOCK="${VMESS_LOCK:-on}"     # 安全默认：公网封锁明文 VMess 端口（仅 Argo 回环可达）

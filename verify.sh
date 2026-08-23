@@ -8,7 +8,7 @@
 #   不再 grep 全局 INPUT/PREROUTING 规则（旧法易误判/误删第三方规则）。
 # 用法: bash verify.sh [SERVER_IP]
 # ===================================================================
-set -uo pipefail
+set -euo pipefail
 
 SERVER_IP="${SERVER_IP:-${1:-}}"   # 兼容两种用法：SERVER_IP=x.x.x.x bash verify.sh 或 bash verify.sh x.x.x.x
 VMESS_LOCK="${VMESS_LOCK:-on}"

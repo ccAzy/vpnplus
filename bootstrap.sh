@@ -7,7 +7,7 @@
 # 只负责准备 Debian/Ubuntu VPS 的基础工具，不安装内核、不部署 sing-box、
 # 不修改防火墙、不重启机器。
 # ===================================================================
-set -uo pipefail
+set -euo pipefail
 
 DRY_RUN=false
 CHECK_ONLY=false

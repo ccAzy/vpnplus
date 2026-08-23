@@ -15,7 +15,7 @@
 #
 # 用法: bash cleanup.sh [--force] [--dry-run]
 # ===================================================================
-set -uo pipefail
+set -euo pipefail
 
 FORCE=""
 DRY_RUN=false
