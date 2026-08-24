@@ -161,6 +161,16 @@ if $DRY_RUN; then
     exit 0
 fi
 install_dependencies || exit 1
+# ── IPv4 优先（防 raw.githubusercontent 等 v6 黑洞导致 curl 卡 75s） ──
+if grep -q 'precedence ::ffff:0:0/96 100' /etc/gai.conf 2>/dev/null; then
+    ok "gai.conf 已设 IPv4 优先"
+else
+    if $DRY_RUN; then
+        info "[dry-run] 将写入 /etc/gai.conf：precedence ::ffff:0:0/96 100（IPv4 优先）"
+    else
+        echo 'precedence ::ffff:0:0/96 100' >> /etc/gai.conf 2>/dev/null && ok "已设 IPv4 优先（/etc/gai.conf）" || warn "写入 /etc/gai.conf 失败（IPv4 优先未生效）"
+    fi
+fi
 for dep in curl jq git xz tmux ip iptables ss tc systemctl; do
     command -v "$dep" >/dev/null 2>&1 || { fail "关键命令缺失: $dep，请先执行 bootstrap.sh"; exit 1; }
 done
