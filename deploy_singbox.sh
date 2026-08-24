@@ -447,31 +447,82 @@ apply_argo_patch() {
 install_argo_keepalive() {
     run bash -c "cat > /usr/local/sbin/vpnplus-argo-keepalive.sh <<'KEEP'
 #!/bin/bash
-# vpnplus Argo 临时隧道保活（由 cron 每 3 分钟调用）
+# vpnplus Argo 临时隧道保活 v2（cron 每 3 分钟）
+# v2 改进: L1进程检查 → L2隧道HTTP连通性检查(僵死检测) → 自动重连换新域名 → L3域名变化自动同步订阅
 LOG=/etc/s-box/argo.log
-pgrep -f 'cloudflared.*tunnel.*localhost' >/dev/null 2>&1 && exit 0
 WS_PORT=\$(sed 's://.*::g' /etc/s-box/sb.json 2>/dev/null | jq -r '.inbounds[1].listen_port' 2>/dev/null)
 [ -n \"\$WS_PORT\" ] && [ \"\$WS_PORT\" != \"null\" ] || exit 0
-pkill -9 -f 'cloudflared.*tunnel.*localhost' 2>/dev/null || true
-sleep 1
-nohup /etc/s-box/cloudflared tunnel --url \"http://localhost:\$WS_PORT\" \\
-  --edge-ip-version auto --no-autoupdate --protocol auto \\
-  \$(cat /etc/s-box/argo-extra.conf 2>/dev/null) > \"\$LOG\" 2>&1 &
-sleep 15
-if pgrep -f 'cloudflared.*tunnel.*localhost' >/dev/null 2>&1; then
-    printf '9\\n1\\n0\\n0\\n0\\n' | timeout 30 bash /usr/bin/sb > /dev/null 2>&1 || true
+
+get_url() { grep -ao 'https://[a-z0-9.-]*\\.trycloudflare\\.com' \"\$LOG\" 2>/dev/null | tail -1; }
+
+restart_tunnel() {
+    pkill -9 -f 'cloudflared.*tunnel.*localhost' 2>/dev/null || true
+    sleep 1
+    : > \"\$LOG\"
+    nohup /etc/s-box/cloudflared tunnel --url \"http://localhost:\$WS_PORT\" \\
+      --edge-ip-version auto --no-autoupdate --protocol auto \\
+      \$(cat /etc/s-box/argo-extra.conf 2>/dev/null) > \"\$LOG\" 2>&1 &
+}
+
+refresh_sub() {
+    printf '9\\n1\\n0\\n0\\n0\\n' | timeout 30 bash /usr/bin/sb >/dev/null 2>&1 || true
     pkill -9 -f 'bash /usr/bin/sb' 2>/dev/null || true
-    logger -t vpnplus-argo '临时隧道掉线后已自动重启并刷新订阅'
+}
+
+OLD_URL=\$(get_url)
+
+# L1: 进程不在 → 直接重启
+if ! pgrep -f 'cloudflared.*tunnel.*localhost' >/dev/null 2>&1; then
+    restart_tunnel
+    sleep 15
+    NEW_URL=\$(get_url)
+    if [ -n \"\$NEW_URL\" ]; then refresh_sub; logger -t vpnplus-argo \"L1进程缺失已重启, 域名 \$OLD_URL -> \$NEW_URL, 订阅已同步\"; fi
+    exit 0
+fi
+
+# L2: 进程在但隧道可能僵死 — HTTP 探测当前域名(任意状态码=链路通; 000=僵死)
+CUR_URL=\$(get_url)
+if [ -z \"\$CUR_URL\" ]; then
+    restart_tunnel; sleep 15
+    NEW_URL=\$(get_url)
+    [ -n \"\$NEW_URL\" ] && { refresh_sub; logger -t vpnplus-argo \"L2无域名记录已重启, 新域名 \$NEW_URL\"; }
+    exit 0
+fi
+HTTP=\$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 6 --max-time 12 \"\$CUR_URL\" 2>/dev/null || echo 000)
+if [ \"\$HTTP\" = \"000\" ]; then
+    # 二次确认(防瞬时抖动误杀): 换协议参数再探一次
+    sleep 5
+    HTTP2=\$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 6 --max-time 12 \"\$CUR_URL\" 2>/dev/null || echo 000)
+    if [ \"\$HTTP2\" = \"000\" ]; then
+        restart_tunnel
+        sleep 15
+        NEW_URL=\$(get_url)
+        if [ -n \"\$NEW_URL\" ] && [ \"\$NEW_URL\" != \"\$CUR_URL\" ]; then
+            refresh_sub
+            logger -t vpnplus-argo \"L2隧道僵死(HTTP 000x2)已重连换域名 \$CUR_URL -> \$NEW_URL, 订阅已同步\"
+        elif [ -n \"\$NEW_URL\" ]; then
+            logger -t vpnplus-argo 'L2隧道僵死已重连(域名未变)'
+        fi
+        exit 0
+    fi
+fi
+
+# L3: 隧道正常但订阅里还是旧域名(上次重连没同步成功) → 补同步
+if [ -n \"\$OLD_URL\" ] && grep -q 'trycloudflare' /etc/s-box/jhsub.txt 2>/dev/null; then
+    if ! grep -q \"\$(echo \"\$OLD_URL\" | sed 's|https://||')\" /etc/s-box/jhsub.txt 2>/dev/null; then
+        refresh_sub
+        logger -t vpnplus-argo 'L3订阅与运行域名不一致, 已补同步'
+    fi
 fi
 exit 0
 KEEP"
     run chmod +x /usr/local/sbin/vpnplus-argo-keepalive.sh
     if ! $DRY_RUN; then
-        ( crontab -l 2>/dev/null | grep -vE 'vpnplus-argo-keepalive|acvpn-argo-keepalive'; echo '*/3 * * * * /usr/local/sbin/vpnplus-argo-keepalive.sh > /dev/null 2>&1' ) | crontab - 2>/dev/null || true
+        ( crontab -l 2>/dev/null | grep -vE 'vpnplus-argo-keepalive|acvn-argo-keepalive|acvpn-argo-keepalive'; echo '*/3 * * * * /usr/local/sbin/vpnplus-argo-keepalive.sh > /dev/null 2>&1' ) | crontab - 2>/dev/null || true
     else
         info "[dry-run] 写入 cron: vpnplus-argo-keepalive 每3分钟"
     fi
-    ok "Argo 保活已安装（每 3 分钟自检，掉线自动拉起并刷新订阅）"
+    ok "Argo 保活 v2 已安装（每 3 分钟：进程+HTTP 双检，僵死自动重连换新域名并同步订阅）"
 }
 
 # ── 订阅 HTTP 服务保障（busybox httpd；精确按端口定位，绝不杀全局 busybox） ──

@@ -2,6 +2,11 @@
 
 ## 2026-08-24 — 稳定性修复（所有改动已在 HK 服务器 85.121.51.211 实测验证）
 
+- **`deploy_singbox.sh` Argo 临时隧道保活升级 v2（三级自愈）**：原保活只查进程是否存在，进程僵死（连接边缘断开）时不处理、重连后也不同步新域名。v2 改为：
+  - **L1** 进程缺失 → 重启
+  - **L2** 进程在但当前域名 HTTP 探测为 000（无任何状态码，二次确认防瞬时抖动）→ 判僵死 → 重启换新域名
+  - **L3** 重连后域名变化 → 自动刷新订阅（jhsub/clmi/sbox 全部指向新域名），并兜底补同步不一致
+  - HK 真机实测：杀进程→keepalive 自动重启（域名 cant-building→baptist-fourth-permit-geological）→ 订阅同步 → 客户端经新 Argo 域名端到端 HTTP 204。
 - **`deploy_singbox.sh` VMESS_LOCK 默认 `on→off`**：默认不启用防主动探测防火墙锁端口，明文 VMess 公网直连。适合仅密钥登录+关闭密码登录+改 SSH 端口、无多余暴露面、希望节点全通的场景（HK 实测 2082 明文端口由"不通"变通）。需要额外防探测时设 `VMESS_LOCK=on`。
 - **`deploy_singbox.sh` 新增 `sb_feed` 包装函数**：统一所有 sb(sing-box-yg) 菜单投喂（安装/订阅/WARP/域名分流/Argo），解决上游 sb 子菜单"完成操作后 `sleep 3 && sb` 递归拉起新面板、管道喂完存 stdin 耗尽导致脚本卡死/残留孤儿 sb 进程"的问题。末尾补多组 0 逐层退出 + timeout 限时 + 结束强杀残留，根治 `rm -f /etc/.vpnplus-singbox && bash deploy_singbox.sh` 强制重跑卡死。
 - **`deploy_singbox.sh` 配置端口跳跃前清理 PREROUTING 过期跳跃段残留**：重跑会累积指向已废弃端口的孤立 UDP DNAT/REDIRECT（40000:42000/43000:45000/40000:41000），排在 `ACVPN_PORTHOP` 前把 hy2/tuic 跳跃段流量引入不存在的端口 → 握手无响应（Karing/V2rayN 实测不通）。现按行号幂等清除（真机验证），不碰 ACVPN_PORTHOP 链内规则及其他 NAT。
