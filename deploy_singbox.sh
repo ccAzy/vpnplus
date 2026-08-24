@@ -730,6 +730,65 @@ ensure_sub_httpd() {
     fi
 }
 
+# ── 订阅后处理：修复 sb 生成的 mport 重复（双 DNAT 导致 40000-42000,40000-42000） ──
+fix_mport_dup() {
+    # sb 的 hy2 mport 来源是: iptables -t nat -nL | grep hy2_port | awk '{print $8}'
+    # 若 PREROUTING 残留 + ACVPN_PORTHOP 各有一条 DNAT，sb 会拼成 "40000-42000,40000-42000"。
+    # 这里做幂等去重：对 hy2.txt / jhsub.txt / websbox 副本的 mport= 去重逗号段。
+    local changed=false f
+    for f in /etc/s-box/hy2.txt /etc/s-box/jhsub.txt; do
+        [ -f "$f" ] || continue
+        # 仅当出现重复逗号段时处理
+        if grep -q 'mport=' "$f" 2>/dev/null && grep -q 'mport=.*,' "$f" 2>/dev/null; then
+            local tmp
+            tmp=$(mktemp)
+            # 逐行：把 mport= 后的逗号列表去重（保留首次出现顺序）
+            python3 - "$f" "$tmp" <<'PY' 2>/dev/null || true
+import sys, re
+src, dst = sys.argv[1], sys.argv[2]
+def dedup_line(line):
+    m = re.search(r'mport=([^&\s]+)', line)
+    if not m:
+        return line
+    raw = m.group(1)
+    parts = raw.split(',')
+    seen=set(); uniq=[]
+    for p in parts:
+        p=p.strip()
+        if p and p not in seen:
+            seen.add(p); uniq.append(p)
+    fixed=','.join(uniq)
+    return line.replace(raw, fixed, 1) if fixed != raw else line
+with open(src, encoding='utf-8', errors='ignore') as s, open(dst,'w', encoding='utf-8') as d:
+    for ln in s:
+        d.write(dedup_line(ln))
+PY
+            if [ -s "$tmp" ] && ! cmp -s "$f" "$tmp" 2>/dev/null; then
+                cat "$tmp" > "$f" 2>/dev/null && changed=true
+            fi
+            rm -f "$tmp" 2>/dev/null || true
+            # python3 不可用/失败时的兜底：仅修已知双写
+            if grep -q 'mport=40000-42000,40000-42000' "$f" 2>/dev/null; then
+                sed -i 's/mport=40000-42000,40000-42000/mport=40000-42000/g' "$f" 2>/dev/null && changed=true
+            fi
+        fi
+    done
+    if [ "$changed" = true ]; then
+        # 同步 websbox 目录（busybox httpd 根）
+        if [ -f /etc/s-box/subtoken.log ] && [ -d /root/websbox ]; then
+            local tok
+            tok=$(tr -cd 'a-zA-Z0-9_-' < /etc/s-box/subtoken.log 2>/dev/null || true)
+            [ -n "$tok" ] && [ -d "/root/websbox/$tok" ] && {
+                cp -f /etc/s-box/jhsub.txt "/root/websbox/$tok/jhsub.txt" 2>/dev/null || true
+                cp -f /etc/s-box/hy2.txt "/root/websbox/$tok/hy2.txt" 2>/dev/null || true
+                # 兼容旧 token 目录落在根下的情况
+                cp -f /etc/s-box/jhsub.txt /root/websbox/jhsub.txt 2>/dev/null || true
+            } || true
+        fi
+        ok "订阅 mport 重复已修复（去重后同步 websbox）"
+    fi
+}
+
 # ── 最终显示订阅链接 ──
 show_subscription() {
     local sub_port token public_ip
@@ -851,6 +910,8 @@ main() {
     # 失败 trap：半成品状态下明确给出恢复指引，而不是带着半配置退出
     trap_interrupt() {
         local rc=$?
+        # 正常完成/主动 skip（rc 0）不算中断，避免 "退出码 0" 误报
+        [ "$rc" -eq 0 ] && return 0
         echo ""
         fail "部署中断（最后退出码 $rc），可能残留半成品状态。"
         info "修复与恢复："
@@ -863,6 +924,8 @@ main() {
     trap 'trap_interrupt' EXIT
 
     if [ -f "$CHECKPOINT" ] && [ -f /etc/s-box/sb.json ] && { systemctl is-active sb >/dev/null 2>&1 || systemctl is-active sing-box >/dev/null 2>&1 || systemctl is-active xr >/dev/null 2>&1; }; then
+        # 已部署跳过≠失败，撤销 EXIT trap 避免误报“部署中断（退出码 0）”
+        trap - EXIT
         ok "sing-box 已部署运行中，跳过安装"; info "强制重装: rm -f $CHECKPOINT && bash deploy_singbox.sh"; return 0
     fi
 
@@ -922,6 +985,7 @@ main() {
     step "6" "WARP + 域名分流（可选）"
     setup_warp
     setup_domain_routing
+    fix_mport_dup || true
     show_subscription || true
 
     step "7" "日志轮转 + 基线体检（可选）"
