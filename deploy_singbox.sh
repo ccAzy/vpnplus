@@ -150,16 +150,30 @@ check_env() {
 setup_subscription() {
     info "配置本地订阅链接..."
     sleep 1
+    # 端口稳定性：重跑时复用已有订阅端口，避免每次随机导致客户端订阅地址作废
+    local KEEP_PORT=""
+    if [ -f /etc/s-box/subport.log ]; then
+        local _p
+        _p=$(grep -oE '[0-9]{1,5}' /etc/s-box/subport.log 2>/dev/null | head -1 || true)
+        # 仅复用合法端口段（与 sb 随机范围一致），异常值则放弃复用走随机
+        if [ -n "$_p" ] && [ "$_p" -ge 1024 ] && [ "$_p" -le 65535 ] 2>/dev/null; then
+            KEEP_PORT="$_p"
+        fi
+    fi
+    if [ -n "$KEEP_PORT" ]; then
+        info "检测到已有订阅端口 $KEEP_PORT，重跑将复用（客户端订阅地址保持有效）"
+    fi
     if ! $DRY_RUN; then
         # 投喂序列对齐当前 sb 菜单（v26.x）：
         #   main changeserv(配置变更) → 8(设置本地IP订阅) → 1(重置安装) →
-        #   \n(路径密码=当前UUID) → \n(端口随机) → 尾部补足 0 逐层返回/退出
+        #   \n(路径密码=当前UUID) → <端口行：已有端口则原样输入保持稳定，否则\n随机> → 尾部补足 0 逐层返回/退出
         # 即便中间 sleep 3 递归拉起新 sb 面板，sb_feed 的 timeout+pkill 也会兜底清理，绝不卡死。
         sb_feed 150 <<-EOSUB || true
 3
 8
 1
 
+${KEEP_PORT}
 
 0
 0
@@ -169,7 +183,7 @@ setup_subscription() {
 EOSUB
         sleep 3
     else
-        info "[dry-run] sb 菜单 3-8-1 配置订阅"
+        info "[dry-run] sb 菜单 3-8-1 配置订阅${KEEP_PORT:+（复用端口 $KEEP_PORT）}"
     fi
     if [ -f /etc/s-box/subport.log ] && [ -f /etc/s-box/subtoken.log ]; then
         ok "订阅配置成功"

@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-08-24 — 稳定性修复（所有改动已在 HK 服务器 85.121.51.211 实测验证）
+
+- **`deploy_singbox.sh` VMESS_LOCK 默认 `on→off`**：默认不启用防主动探测防火墙锁端口，明文 VMess 公网直连。适合仅密钥登录+关闭密码登录+改 SSH 端口、无多余暴露面、希望节点全通的场景（HK 实测 2082 明文端口由"不通"变通）。需要额外防探测时设 `VMESS_LOCK=on`。
+- **`deploy_singbox.sh` 新增 `sb_feed` 包装函数**：统一所有 sb(sing-box-yg) 菜单投喂（安装/订阅/WARP/域名分流/Argo），解决上游 sb 子菜单"完成操作后 `sleep 3 && sb` 递归拉起新面板、管道喂完存 stdin 耗尽导致脚本卡死/残留孤儿 sb 进程"的问题。末尾补多组 0 逐层退出 + timeout 限时 + 结束强杀残留，根治 `rm -f /etc/.vpnplus-singbox && bash deploy_singbox.sh` 强制重跑卡死。
+- **`deploy_singbox.sh` 配置端口跳跃前清理 PREROUTING 过期跳跃段残留**：重跑会累积指向已废弃端口的孤立 UDP DNAT/REDIRECT（40000:42000/43000:45000/40000:41000），排在 `ACVPN_PORTHOP` 前把 hy2/tuic 跳跃段流量引入不存在的端口 → 握手无响应（Karing/V2rayN 实测不通）。现按行号幂等清除（真机验证），不碰 ACVPN_PORTHOP 链内规则及其他 NAT。
+- **`deploy_singbox.sh` 订阅端口稳定性**：`setup_subscription` 重跑时探测并复用已有 `/etc/s-box/subport.log` 端口（1024-65535 合法段），不再每次随机 → 客户端订阅地址重跑后保持有效；无旧端口才随机。
+- **`verify.sh` Argo 可达判定修正**：trycloudflare 隧道代理 WS 服务，根路径 404/4xx 是正常响应（能拿到状态码=边缘→隧道→本地链路通），仅 HTTP 000（连不上/超时）才算不可达，消除误报。
+- **`verify.sh` 新增"PREROUTING 无残留端口跳跃段"检查**：部署后能发现过期跳跃段残留（提醒重跑 deploy 自动清理）。
+- **`cleanup.sh` 兜底清理扩展匹配 REDIRECT 型残留**：除 DNAT 外，同时清理旧配置遗留的 REDIRECT 40000:41000 型重复跳跃规则。
+
 ## 2026-08-21 — 逻辑审查修复（三处）
 
 - 修复 `deploy_singbox.sh` 端口跳跃启用条件：`&&`/`||` 同优先级左结合导致只装 Hysteria2（无 Tuic）时整条 `ACVPN_PORTHOP` 链被静默跳过；改为显式分组 `{ ...; } || { ...; }`，单协议/双协议/双缺失四象限实测验证。

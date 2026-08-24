@@ -103,10 +103,11 @@ clean_chains() {
     fi
 
     # 3) 兜底：若旧版遗留了分散的 nat 端口跳跃规则（40000:42000/43000:45000）也精确按目标端口清理，
-    #    但仅匹配 vpnplus/ACVPN 特有的端口范围 DNAT，依旧不动其他规则。
+    #    但仅匹配 vpnplus/ACVPN 特有的端口范围 DNAT/REDIRECT，依旧不动其他规则。
+    #    （2026-08-24 HK 实测：sing-box 旧配置还会留下 REDIRECT 40000:41000 型重复规则，同样会截胡跳跃段流量）
     command -v iptables >/dev/null 2>&1 && {
         iptables -t nat -L PREROUTING --line-numbers -n 2>/dev/null |
-          grep -E 'DNAT.*dpts:(40000:42000|43000:45000) ' |
+          grep -E '(DNAT|REDIRECT).*dpts:(40000:42000|43000:45000|40000:41000|43000:44000) ' |
           awk '{print $1}' | sort -rn | while read -r num; do
             run iptables -t nat -D PREROUTING "$num"
         done
