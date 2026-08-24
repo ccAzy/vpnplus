@@ -88,6 +88,9 @@ if ss -ulnp 2>/dev/null | grep -q sing-box; then ok "UDP 端口监听正常（Hy
 
 # 独立命名链存在性（vpnplus 防火墙设计核心）
 if iptables -t nat -L "$CHAIN_PORTHOP" -n >/dev/null 2>&1; then ok "端口跳跃链 ${CHAIN_PORTHOP:-ACVPN_PORTHOP} 存在"; PASS=$((PASS + 1)); else warn "端口跳跃链不存在（可能未配置端口跳跃）"; fi
+# PREROUTING 是否残留指向过期端口的孤立跳跃段规则（会导致 hy2/tuic 端口跳跃握手无响应）
+HOP_LEAK=$(iptables -t nat -L PREROUTING -n --line-numbers 2>/dev/null | grep -E "DNAT|REDIRECT" | grep -E "40000:42000|43000:45000" | grep -v "ACVPN_PORTHOP" | head -1 || true)
+if [ -n "$HOP_LEAK" ]; then warn "检测到 PREROUTING 残留过期端口跳跃规则: $HOP_LEAK（重跑 deploy_singbox.sh 会自动清理）"; else ok "PREROUTING 无残留端口跳跃段"; PASS=$((PASS + 1)); fi
 if iptables -L "$CHAIN_ANTIPROBE" -n >/dev/null 2>&1; then ok "防探测链 ${CHAIN_ANTIPROBE:-ACVPN_ANTIPROBE} 存在"; PASS=$((PASS + 1)); else warn "防探测链不存在"; fi
 
 if [ "$VMESS_LOCK" = "on" ]; then

@@ -226,6 +226,23 @@ config_port_hopping() {
         run ip6tables -t nat -X "$CHAIN_PORTHOP" 2>/dev/null || true
     fi
 
+    # 清理 sing-box 透明代理/TUN 残留的孤立端口跳跃规则（重跑会累积指向旧端口的过期 DNAT/REDIRECT）
+    # 背景（2026-08-24 HK 实测）：每天重跑前，PREROUTING 里堆积了指向已废弃端口的
+    #   DNAT(40000:42000→旧hy端口 / 43000:45000→旧tu端口) 和重复 REDIRECT，且排在 ACVPN_PORTHOP 之前，
+    #   优先命中把 hy2/tuic 跳跃段流量引到不存在的端口 → 节点握手无响应、客户端"不通"。
+    # 本段只在确认为 vpnplus 的跳跃段(40000:42000 / 43000:45000 udp)内精确清理，不碰其他 NAT 规则。
+    info "清理 sing-box 残留的过期端口跳跃规则..."
+    local done_hop=false
+    # 按行号删除 PREROUTING 中任何 40000:42000 或 43000:45000 的 UDP DNAT/REDIRECT（不碰 ACVPN_PORTHOP 链内规则与原样跳转）
+    while :; do
+        local rnum
+        rnum=$(iptables -t nat -L PREROUTING -n --line-numbers 2>/dev/null \
+            | awk '$2=="DNAT"||$2=="REDIRECT" { if ($0 ~ /40000:42000/ || $0 ~ /43000:45000/) {print $1; exit} }')
+        [ -z "$rnum" ] && break
+        run iptables -t nat -D PREROUTING "$rnum" 2>/dev/null && { ok "清除残留规则 #$rnum"; done_hop=true; } || break
+    done
+    if [ "$done_hop" = false ]; then info "PREROUTING 端口跳跃段已干净，无需清理（幂等）"; fi
+
     if { [ -n "$HY_PORT" ] && [ "$HY_PORT" != "null" ]; } || { [ -n "$TU_PORT" ] && [ "$TU_PORT" != "null" ]; }; then
         run iptables -t nat -N "$CHAIN_PORTHOP" 2>/dev/null || true
         if [ -n "$HY_PORT" ] && [ "$HY_PORT" != "null" ]; then
