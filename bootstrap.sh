@@ -54,14 +54,14 @@ BOOT_MB=$(df -Pm /boot 2>/dev/null | awk 'NR==2 {print $4}')
 PACKAGES=(
     ca-certificates curl jq git xz-utils tmux
     bash coreutils grep sed gawk
-    iproute2 iptables procps psmisc util-linux
-    cron ethtool kmod
+    iproute2 iptables iptables-persistent procps psmisc util-linux
+    cron ethtool kmod logrotate
 )
 
 missing=()
 for pkg in "${PACKAGES[@]}"; do
     case "$pkg" in
-        ca-certificates|curl|jq|git|xz-utils|tmux|bash|coreutils|grep|sed|gawk|iproute2|iptables|procps|psmisc|util-linux|cron|ethtool|kmod)
+        ca-certificates|curl|jq|git|xz-utils|tmux|bash|coreutils|grep|sed|gawk|iproute2|iptables|iptables-persistent|procps|psmisc|util-linux|cron|ethtool|kmod|logrotate)
             # Debian 包名与命令不完全一一对应，按 dpkg 查询包是否安装
             dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q 'install ok installed' || missing+=("$pkg") ;;
     esac
@@ -83,7 +83,7 @@ else
 fi
 
 # 非安装性检查：提前告诉用户第二阶段会用到的工具是否仍缺失。
-commands=(curl jq git xz tmux bash ip ss iptables ip6tables systemctl crontab pgrep pkill timeout sha256sum sysctl)
+commands=(curl jq git xz tmux bash ip ss iptables iptables-save iptables-restore ip6tables-restore systemctl crontab pgrep pkill timeout sha256sum sysctl flock logrotate)
 missing_cmd=()
 for cmd in "${commands[@]}"; do command -v "$cmd" >/dev/null 2>&1 || missing_cmd+=("$cmd"); done
 if [ "${#missing_cmd[@]}" -gt 0 ]; then

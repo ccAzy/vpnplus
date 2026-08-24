@@ -1,5 +1,27 @@
 # Changelog
 
+## 2026-08-25 — 全面审计修复（11 项，含 1 真实 Bug）
+
+针对公开仓库做全面审计（5 脚本 + 文档），修正全部发现项：
+
+- **`deploy_singbox.sh` iptables 持久化修复（高优）**：旧实现第三层 `iptables-save` 只写文件、无开机加载，重启后 `ACVPN_PORTHOP`/`ACVPN_ANTIPROBE` 独立链规则全部丢失。新增 `persist_firewall()`：优先 netfilter-persistent，并**额外写 `/etc/iptables/rules.v4|v6` + 自建 `vpnplus-netfilter-restore.service`（network-pre.target 前恢复）双保险**。两处调用点（端口跳跃/防探测）统一收敛。bootstrap/deploy 依赖新增 `iptables-persistent`。
+- **`cleanup.sh` 漏删 Argo 保活脚本（真实 Bug）**：`rm_files` 只删旧名 `acvpn-argo-keepalive.sh`，**未删新版 `vpnplus-argo-keepalive.sh`**，清理后留孤儿。现已补删，并连带清理 `vpnplus-netfilter-restore.service`、iptables 快照、lock 文件、logrotate 配置；`verify_clean` 新增对应断言。
+- **`deploy_singbox.sh` 保活脚本 v3**：`install_argo_keepalive` 改为**纯单引号 heredoc 直写**（彻底消除旧版 bash -c 双层转义出错风险），并升级逻辑：
+  - **flock 互斥**：禁止两个保活实例并发 pkill/重启互踩
+  - **进程识别统一**：临时隧道口径改为 `cloudflared+tunnel+--url`，与 `start_argo`/`cleanup` 一致（不再只认 localhost）
+  - **cloudflared 路径自动探测**：不再硬编码 `/etc/s-box/cloudflared`
+  - **WS 端口健壮化**：优先按 type==vless + transport==ws 取，退化 inbounds[1]
+  - **翻动检测**：30 分钟内连续重连 ≥5 次 → 触发 1 小时冷却并写 `argo-flapping.marker`（防域名无限漂移折腾客户端）
+- **`deploy_singbox.sh` sb.sh 哈希复查**：重跑时即使 sb 已存在也校验哈希（原版 或 Argo 补丁白名单 `SB_PATCH_MARKER`），不在可信集合则重新下载覆盖，避免"首次校验后 /usr/bin/sb 被篡改/被 sed 补丁失去 pin 意义"。补丁版哈希由 `apply_argo_patch` 实时记录。
+- **`deploy_singbox.sh` sb_feed 精确清理 + 日志**：只杀"本次调用期间新出现"的 sb 进程（PID 差集），不再 `pkill -f 'bash /usr/bin/sb'` 误杀同机手动开的 sb 面板；sb 交互输出去色后追加到 `/var/log/vpnplus-sbfeed.log` 供失败回溯。
+- **`deploy_singbox.sh` sb 菜单版本指纹**：首次部署前抓 sb 横幅识别版本，非预期 v2x 系列则告警（防菜单序号漂移导致安装"产物缺失才报错"难排查）。
+- **`deploy_singbox.sh` 失败 trap**：中断时明确给出恢复指引（cleanup 预览/重跑/彻底重建 + sbfeed 日志位置），不再带着半配置无提示退出。
+- **`deploy_singbox.sh` 可调常量收敛**：端口跳跃段（40000:42000/43000:45000）与限速/连接数阈值集中到顶部 `readonly` 常量，清除散落各处的魔法数，杜绝 2026-08-21 那类单点改漏。
+- **`deploy_singbox.sh` 日志轮转**：新增 `setup_logrotate`（step 7），对 vpnplus 各类日志 + `argo.log` 周轮+保留 4 份+压缩（`copytruncate` 防 tee/重定向句柄丢失）。
+- **`verify.sh` 增强**：新增校验 netfilter-restore unit 存在/启用、logrotate 配置、保活脚本 + cron + flock、网络调优服务 enable 状态。
+- **`cleanup.sh` 进程口径统一**：`kill_procs`/`verify_clean` 改用 `cloudflared.*tunnel.*--url`，与保活脚本一致；`pgrep -fc` 改用 `pgrep -f | wc -l` 防自匹配误计。
+- **审计方法论沉淀**：全面审计读完全部 5 脚本+CHANGELOG+SKILL，逐项标注优先级与诚实边界（需真机确认项以#3/#5 类锚点标出，余皆代码直接判定）。
+
 ## 2026-08-24 — 稳定性修复（所有改动已在 HK 服务器 85.121.51.211 实测验证）
 
 - **`deploy_singbox.sh` Argo 临时隧道保活升级 v2（三级自愈）**：原保活只查进程是否存在，进程僵死（连接边缘断开）时不处理、重连后也不同步新域名。v2 改为：

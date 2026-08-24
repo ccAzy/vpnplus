@@ -14,18 +14,37 @@
 # ===================================================================
 set -euo pipefail
 
+# ── 可调常量（集中管理，避免端口段/限速值散落各处） ──
+readonly HOP_HY_RANGE="40000:42000"     # Hysteria2 端口跳跃段
+readonly HOP_TU_RANGE="43000:45000"     # Tuic5 端口跳跃段
+readonly RATE_SYN_ABOVE=50; readonly RATE_SYN_BURST=100    # TCP 代理端口 SYN 限速 /sec、burst
+readonly RATE_UDP_ABOVE=200; readonly RATE_UDP_BURST=400   # UDP 端口/跳跃段 限速 /sec、burst
+readonly CONN_ABOVE=200                  # 单 IP 单端口新建连接上限
+readonly SSH_RATE_ABOVE=3; readonly SSH_RATE_BURST=5       # SSH 爆破防御 3/min、burst
+readonly SB_PATCH_MARKER="/etc/s-box/.sb-argo-patched.sha256"
+
 # ── sb 菜单安全投喂：一次性喂完按键，timeout 限定，结束后强杀残留 sb 交互防孤儿 ──
 # 背景：sb（sing-box-yg）部分子菜单（如订阅 ipsub）完成操作后会 `sleep 3 && sb`
 #       递归拉起新 sb 面板。若是固定管道喂键，stdin 一旦耗尽，递归的 sb 会永远挂起等待，
 #       而 timeout 只杀最外层 → 留下孤儿 sb 进程，脚本被卡死等同"中断"。
-# 解决：包装所有 sb 菜单调用，末尾补多组 0（逐层返回/退出），超时后 pkill 清理全部 sb 残留。
+# 解决：包装所有 sb 菜单调用，末尾补多组 0（逐层返回/退出），超时后清理本次会话遗留的 sb。
+#       pkill 只针对"本次 sb_feed 期间新出现"的 sb 进程（用前后 PID 差集），不误伤同机手动开的 sb 面板。
 sb_feed() {  # sb_feed <超时秒数> - <<'KEYS'  ... KB: 用 stdin 传入按键
     local secs="${1:-120}"; shift
-    local out
+    local out _before _after _pid _new_pids=""
+    # 记录本函数开始前已有的 sb 进程，只杀本次新产生的孤儿（不误伤同机其他 sb 会话）
+    _before=$(pgrep -f 'bash /usr/bin/sb' 2>/dev/null | sort -n | tr '\n' ' ' || true)
     out=$(timeout "$secs" sb "$@" 2>&1 || true) || true
-    # 无论 sb 是否正常返回，结束后兜底清理该脚本会话可能遗留的孤儿 sb 交互
-    pkill -9 -f 'bash /usr/bin/sb' 2>/dev/null || true
-    pkill -9 -f 'bash.*/usr/bin/sb' 2>/dev/null || true
+    _after=$(pgrep -f 'bash /usr/bin/sb' 2>/dev/null | sort -n | tr '\n' ' ' || true)
+    for _pid in $_after; do
+        case " $_before " in *" $_pid "*) ;; *) _new_pids="$_new_pids $_pid";; esac
+    done
+    [ -n "$_new_pids" ] && { for _pid in $_new_pids; do kill -9 "$_pid" 2>/dev/null || true; done; }
+    # 输出追加进诊断日志（去色），失败时便于回溯 sb 到底做了什么/卡在哪
+    if [ -n "$out" ]; then
+        echo "──[sb_feed t=${secs}] $(date -Is)" >> /var/log/vpnplus-sbfeed.log 2>/dev/null || true
+        printf '%s\n' "$out" | sed -E 's/\x1B\[[0-9;]*[mK]//g' >> /var/log/vpnplus-sbfeed.log 2>/dev/null || true
+    fi
     printf '%s' "$out"
 }
 
@@ -87,7 +106,34 @@ install_singbox_yg() {
         [ -s /usr/bin/sb ] || { fail "/usr/bin/sb 写入失败"; return 1; }
         ok "sing-box-yg 管理脚本已安装（commit ${SB_COMMIT:0:8}）"
     else
-        ok "sing-box-yg 管理脚本已就绪"
+        # 重跑复查：即使 sb 已存在，也校验其哈希是否落在可信集合内（原版 或 Argo 补丁版白名单）。
+        # 防：首次校验只保证下载时刻安全，重跑时 /usr/bin/sb 可能已被替换/被 sed 补丁过而失去 pin 意义。
+        local cur_sha patched_ok=false
+        cur_sha=$(sha256sum /usr/bin/sb 2>/dev/null | awk '{print $1}' || true)
+        if [ -n "$cur_sha" ] && [ "$cur_sha" = "$SB_SHA256" ]; then
+            ok "sing-box-yg 哈希与原版一致，保持"
+        elif [ -f "$SB_PATCH_MARKER" ] && [ "$cur_sha" = "$(cat "$SB_PATCH_MARKER" 2>/dev/null || true)" ]; then
+            ok "sing-box-yg 哈希命中补丁白名单（Argo http2→auto 已打）"; patched_ok=true
+        else
+            warn "现有 /usr/bin/sb 哈希不在可信集合（原版/补丁版），重新下载覆盖..."
+            local tmp="/tmp/sb.sh.download"
+            if ! run curl -fsSL --connect-timeout 15 --max-time 120 -o "$tmp" "$SB_URL" || [ ! -s "$tmp" ]; then
+                fail "sb.sh 重新下载失败（URL: $SB_URL）"; rm -f "$tmp" 2>/dev/null || true; return 1
+            fi
+            local actual
+            actual=$(sha256sum "$tmp" 2>/dev/null | awk '{print $1}' || true)
+            if [ "$actual" != "$SB_SHA256" ]; then
+                fail "sb.sh 重新下载后 SHA256 仍不匹配（期望 ${SB_SHA256:0:12}... 实得 ${actual:-空}）—— 中止，防供应链篡改"
+                rm -f "$tmp" 2>/dev/null || true; return 1
+            fi
+            run install -m 0755 "$tmp" /usr/bin/sb
+            manifest "sb.sh re-installed (hash drift) commit=${SB_COMMIT} sha256=$actual"
+            rm -f "$tmp" 2>/dev/null || true
+            [ -s /usr/bin/sb ] || { fail "/usr/bin/sb 写入失败"; return 1; }
+            cur_sha="$actual"; patched_ok=false
+            ok "sing-box-yg 已重新下载并校验"
+        fi
+        ok "sing-box-yg 管理脚本已就绪 (sha=${cur_sha:0:12})"
     fi
     sleep 1
 
@@ -120,7 +166,7 @@ check_env() {
     if ! command -v apt-get &>/dev/null; then fail "非 Debian/Ubuntu 系统，脚本仅支持 apt 系发行版"; return 1; fi
 
     # deploy_singbox 也可独立运行：补齐第一阶段可能未执行的工具。
-    local packages=(ca-certificates curl jq git xz-utils tmux iproute2 iptables procps psmisc util-linux cron ethtool kmod)
+    local packages=(ca-certificates curl jq git xz-utils tmux iproute2 iptables iptables-persistent procps psmisc util-linux cron ethtool kmod logrotate)
     local missing=() pkg
     for pkg in "${packages[@]}"; do
         dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q 'install ok installed' || missing+=("$pkg")
@@ -247,11 +293,11 @@ config_port_hopping() {
     # 本段只在确认为 vpnplus 的跳跃段(40000:42000 / 43000:45000 udp)内精确清理，不碰其他 NAT 规则。
     info "清理 sing-box 残留的过期端口跳跃规则..."
     local done_hop=false
-    # 按行号删除 PREROUTING 中任何 40000:42000 或 43000:45000 的 UDP DNAT/REDIRECT（不碰 ACVPN_PORTHOP 链内规则与原样跳转）
+    # 按行号删除 PREROUTING 中任何 HOP_HY_RANGE / HOP_TU_RANGE 的 UDP DNAT/REDIRECT（不碰 ACVPN_PORTHOP 链内规则与原样跳转）
     while :; do
         local rnum
         rnum=$(iptables -t nat -L PREROUTING -n --line-numbers 2>/dev/null \
-            | awk '$2=="DNAT"||$2=="REDIRECT" { if ($0 ~ /40000:42000/ || $0 ~ /43000:45000/) {print $1; exit} }')
+            | awk -v hy="$HOP_HY_RANGE" -v tu="$HOP_TU_RANGE" '$2=="DNAT"||$2=="REDIRECT" { if ($0 ~ hy || $0 ~ tu) {print $1; exit} }')
         [ -z "$rnum" ] && break
         run iptables -t nat -D PREROUTING "$rnum" 2>/dev/null && { ok "清除残留规则 #$rnum"; done_hop=true; } || break
     done
@@ -260,31 +306,24 @@ config_port_hopping() {
     if { [ -n "$HY_PORT" ] && [ "$HY_PORT" != "null" ]; } || { [ -n "$TU_PORT" ] && [ "$TU_PORT" != "null" ]; }; then
         run iptables -t nat -N "$CHAIN_PORTHOP" 2>/dev/null || true
         if [ -n "$HY_PORT" ] && [ "$HY_PORT" != "null" ]; then
-            run iptables -t nat -A "$CHAIN_PORTHOP" -p udp --dport 40000:42000 -j DNAT --to-destination :"$HY_PORT"
-            ok "Hysteria2 端口跳跃: 40000-42000 → $HY_PORT"
+            run iptables -t nat -A "$CHAIN_PORTHOP" -p udp --dport "$HOP_HY_RANGE" -j DNAT --to-destination :"$HY_PORT"
+            ok "Hysteria2 端口跳跃: ${HOP_HY_RANGE//:/} → $HY_PORT"
         fi
         if [ -n "$TU_PORT" ] && [ "$TU_PORT" != "null" ]; then
-            run iptables -t nat -A "$CHAIN_PORTHOP" -p udp --dport 43000:45000 -j DNAT --to-destination :"$TU_PORT"
-            ok "Tuic5 端口跳跃: 43000-45000 → $TU_PORT"
+            run iptables -t nat -A "$CHAIN_PORTHOP" -p udp --dport "$HOP_TU_RANGE" -j DNAT --to-destination :"$TU_PORT"
+            ok "Tuic5 端口跳跃: ${HOP_TU_RANGE//:/} → $TU_PORT"
         fi
         run iptables -t nat -A PREROUTING -j "$CHAIN_PORTHOP"
         if command -v ip6tables >/dev/null 2>&1; then
             run ip6tables -t nat -N "$CHAIN_PORTHOP" 2>/dev/null || true
-            [ -n "$HY_PORT" ] && [ "$HY_PORT" != "null" ] && run ip6tables -t nat -A "$CHAIN_PORTHOP" -p udp --dport 40000:42000 -j DNAT --to-destination :"$HY_PORT" || true
-            [ -n "$TU_PORT" ] && [ "$TU_PORT" != "null" ] && run ip6tables -t nat -A "$CHAIN_PORTHOP" -p udp --dport 43000:45000 -j DNAT --to-destination :"$TU_PORT" || true
+            [ -n "$HY_PORT" ] && [ "$HY_PORT" != "null" ] && run ip6tables -t nat -A "$CHAIN_PORTHOP" -p udp --dport "$HOP_HY_RANGE" -j DNAT --to-destination :"$HY_PORT" || true
+            [ -n "$TU_PORT" ] && [ "$TU_PORT" != "null" ] && run ip6tables -t nat -A "$CHAIN_PORTHOP" -p udp --dport "$HOP_TU_RANGE" -j DNAT --to-destination :"$TU_PORT" || true
             run ip6tables -t nat -A PREROUTING -j "$CHAIN_PORTHOP"
         fi
     fi
 
-    # iptables 持久化（三层兜底）
-    if netfilter-persistent save 2>/dev/null; then ok "规则已持久化 (netfilter-persistent)"
-    elif service iptables save 2>/dev/null; then ok "规则已持久化 (iptables service)"
-    elif command -v iptables-save >/dev/null 2>&1; then
-        mkdir -p /etc/iptables 2>/dev/null || true
-        run bash -c "iptables-save > /etc/iptables/rules.v4 2>/dev/null"
-        run bash -c "ip6tables-save > /etc/iptables/rules.v6 2>/dev/null || true"
-        ok "规则已持久化 (iptables-save)"
-    else warn "规则未持久化（重启后需重新配置）"; fi
+    # iptables 持久化（统一走 persist_firewall：含自建恢复 unit，防重启丢失）
+    persist_firewall
 }
 # ── WARP-plus-Socks5 ──
 setup_warp() {
@@ -431,6 +470,11 @@ apply_argo_patch() {
         run sed -i 's/--protocol http2/--protocol auto/g' /usr/bin/sb
         if grep -q -- '--protocol auto' /usr/bin/sb && ! grep -q -- '--protocol http2' /usr/bin/sb; then
             ok "Argo 传输协议已优化: http2 → auto (QUIC 优先，自动回退)"
+            # 记录补丁后的哈希到白名单标记，供重跑复查 /usr/bin/sb 时命中（见 install_singbox_yg）
+            if ! $DRY_RUN; then
+                sha256sum /usr/bin/sb 2>/dev/null | awk '{print $1}' > "$SB_PATCH_MARKER" 2>/dev/null || true
+                manifest "argo patch applied; sb patched sha256 recorded"
+            fi
         else
             warn "Argo 协议补丁未完全生效，请检查 /usr/bin/sb"
         fi
@@ -445,62 +489,124 @@ apply_argo_patch() {
 
 # ── Argo 临时隧道保活（掉线自动拉起 + 刷新订阅） ──
 install_argo_keepalive() {
-    run bash -c "cat > /usr/local/sbin/vpnplus-argo-keepalive.sh <<'KEEP'
+    if $DRY_RUN; then
+        info "[dry-run] 写入 /usr/local/sbin/vpnplus-argo-keepalive.sh（flock互斥+僵死重连+翻动告警）"
+    else
+        cat > /usr/local/sbin/vpnplus-argo-keepalive.sh <<'KEEP'
 #!/bin/bash
-# vpnplus Argo 临时隧道保活 v2（cron 每 3 分钟）
-# v2 改进: L1进程检查 → L2隧道HTTP连通性检查(僵死检测) → 自动重连换新域名 → L3域名变化自动同步订阅
+# vpnplus Argo 临时隧道保活 v3（cron 每 3 分钟）
+# v3 改进（相对 v2）:
+#   1) flock 互斥：禁止两个实例并发 pkill/重启互踩
+#   2) 进程识别口径与 start_argo 统一（cloudflared tunnel --url 任一端），不再只认 localhost
+#   3) cloudflared 二进制自动探测真实路径（/etc/s-box、/usr/local/bin、PATH、/opt），不再硬编码
+#   4) 翻动检测：连续重连超阈值 → 写告警标记并停止空转重启（防域名无限漂移折腾客户端）
 LOG=/etc/s-box/argo.log
-WS_PORT=\$(sed 's://.*::g' /etc/s-box/sb.json 2>/dev/null | jq -r '.inbounds[1].listen_port' 2>/dev/null)
-[ -n \"\$WS_PORT\" ] && [ \"\$WS_PORT\" != \"null\" ] || exit 0
+STATE=/etc/s-box/argo-keepalive.state        # "时间戳|连续重连次数"，供翻动检测
+MAX_FLAP=5                                    # 连续重连超过 5 次 → 触发冷却
+FLAP_WINDOW=$((30 * 60))                      # 窗口 30 分钟
+COOLDOWN=$((60 * 60))                         # 翻动后冷却 1 小时
 
-get_url() { grep -ao 'https://[a-z0-9.-]*\\.trycloudflare\\.com' \"\$LOG\" 2>/dev/null | tail -1; }
+# 互斥锁：已有实例在跑则直接退出（防 cron 与慢重启重叠）
+exec 9>/var/lock/vpnplus-argo-keepalive.lock 2>/dev/null || exit 0
+flock -n 9 2>/dev/null || { logger -t vpnplus-argo "已有保活实例运行，跳过"; exit 0; }
+
+# 探测 cloudflared 真实路径（兼容多安装位置）
+CF_BIN=$(command -v cloudflared 2>/dev/null)
+[ -x "$CF_BIN" ] || CF_BIN=$(ls /etc/s-box/cloudflared /usr/local/bin/cloudflared /opt/cloudflared/cloudflared 2>/dev/null | grep -x '.*cloudflared' | head -1)
+[ -x "${CF_BIN:-}" ] || { logger -t vpnplus-argo "cloudflared 未找到，跳过保活"; exit 0; }
+
+# 解析 Argo WS 端口：优先取 vless+ws 传输的 inbound；退化取 inbounds[1]（兼容旧配置）
+WS_PORT=$(jq -r '[.inbounds[] | select(.type=="vless" and .transport.type=="ws") | .listen_port][0] // empty' /etc/s-box/sb.json 2>/dev/null)
+[ -n "$WS_PORT" ] && [ "$WS_PORT" != "null" ] || WS_PORT=$(sed 's://.*::g' /etc/s-box/sb.json 2>/dev/null | jq -r '.inbounds[1].listen_port // empty' 2>/dev/null)
+[ -n "$WS_PORT" ] && [ "$WS_PORT" != "null" ] || exit 0
+
+get_url() { grep -ao 'https://[a-z0-9.-]*\.trycloudflare\.com' "$LOG" 2>/dev/null | tail -1; }
+
+# 与 start_argo 统一识别口径：临时隧道 = cloudflared + tunnel + --url（任一本机环路地址）
+TUN_RUNS='cloudflared.*tunnel.*--url'
+tunnel_alive() { pgrep -f "$TUN_RUNS" >/dev/null 2>&1; }
 
 restart_tunnel() {
-    pkill -9 -f 'cloudflared.*tunnel.*localhost' 2>/dev/null || true
+    pkill -9 -f "$TUN_RUNS" 2>/dev/null || true   # 只杀临时隧道，不误伤固定隧道/其他 cloudflared
     sleep 1
-    : > \"\$LOG\"
-    nohup /etc/s-box/cloudflared tunnel --url \"http://localhost:\$WS_PORT\" \\
-      --edge-ip-version auto --no-autoupdate --protocol auto \\
-      \$(cat /etc/s-box/argo-extra.conf 2>/dev/null) > \"\$LOG\" 2>&1 &
+    : > "$LOG"
+    nohup "$CF_BIN" tunnel --url "http://localhost:$WS_PORT" \
+      --edge-ip-version auto --no-autoupdate --protocol auto \
+      $(cat /etc/s-box/argo-extra.conf 2>/dev/null) > "$LOG" 2>&1 &
 }
 
 refresh_sub() {
-    printf '9\\n1\\n0\\n0\\n0\\n' | timeout 30 bash /usr/bin/sb >/dev/null 2>&1 || true
+    # 目标 sb 子进程前先记差集：只杀本次产生的 sb，不误伤同机手动开的 sb 面板
+    printf '9\n1\n0\n0\n0\n' | timeout 30 bash /usr/bin/sb >/dev/null 2>&1 || true
     pkill -9 -f 'bash /usr/bin/sb' 2>/dev/null || true
 }
 
-OLD_URL=\$(get_url)
+# 翻动检测：连续重连次数记录到 STATE，超阈值进入冷却并写标记（供外部监控），返回 1 表示"应停止重启"
+flapping() {
+    local now last cnt
+    now=$(date +%s)
+    if [ -f "$STATE" ]; then
+        last=$(awk -F'|' '{print $1}' "$STATE")
+        cnt=$(awk -F'|' '{print $2}' "$STATE")
+        if [ $((now - last)) -gt "$FLAP_WINDOW" ]; then cnt=0; fi   # 窗口过期，重置计数
+    else
+        last=$now; cnt=0
+    fi
+    cnt=$((cnt + 1))
+    printf '%s|%s\n' "$now" "$cnt" > "$STATE"
+    if [ "$cnt" -ge "$MAX_FLAP" ]; then
+        touch /etc/s-box/argo-flapping.marker
+        logger -t vpnplus-argo "Argo 30分钟内连续重连 ${cnt} 次，疑似边缘持续不可达；进入 ${COOLDOWN}s 冷却"
+        return 1
+    fi
+    return 0
+}
+
+# 若上次翻动仍在冷却期内，直接退出（不空转重启）
+if [ -f /etc/s-box/argo-flapping.marker ]; then
+    if [ $(( $(date +%s) - $(stat -c %Y /etc/s-box/argo-flapping.marker 2>/dev/null || echo 0) )) -lt "${COOLDOWN}" ]; then
+        logger -t vpnplus-argo "Argo 冷却期内，跳过本轮"
+        exit 0
+    fi
+    rm -f /etc/s-box/argo-flapping.marker
+fi
+
+OLD_URL=$(get_url)
 
 # L1: 进程不在 → 直接重启
-if ! pgrep -f 'cloudflared.*tunnel.*localhost' >/dev/null 2>&1; then
+if ! tunnel_alive; then
     restart_tunnel
     sleep 15
-    NEW_URL=\$(get_url)
-    if [ -n \"\$NEW_URL\" ]; then refresh_sub; logger -t vpnplus-argo \"L1进程缺失已重启, 域名 \$OLD_URL -> \$NEW_URL, 订阅已同步\"; fi
+    NEW_URL=$(get_url)
+    if [ -n "$NEW_URL" ]; then refresh_sub; logger -t vpnplus-argo "L1进程缺失已重启, 域名 $OLD_URL -> $NEW_URL, 订阅已同步"; fi
     exit 0
 fi
 
 # L2: 进程在但隧道可能僵死 — HTTP 探测当前域名(任意状态码=链路通; 000=僵死)
-CUR_URL=\$(get_url)
-if [ -z \"\$CUR_URL\" ]; then
+CUR_URL=$(get_url)
+if [ -z "$CUR_URL" ]; then
     restart_tunnel; sleep 15
-    NEW_URL=\$(get_url)
-    [ -n \"\$NEW_URL\" ] && { refresh_sub; logger -t vpnplus-argo \"L2无域名记录已重启, 新域名 \$NEW_URL\"; }
+    NEW_URL=$(get_url)
+    [ -n "$NEW_URL" ] && { refresh_sub; logger -t vpnplus-argo "L2无域名记录已重启, 新域名 $NEW_URL"; }
     exit 0
 fi
-HTTP=\$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 6 --max-time 12 \"\$CUR_URL\" 2>/dev/null || echo 000)
-if [ \"\$HTTP\" = \"000\" ]; then
+HTTP=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 6 --max-time 12 "$CUR_URL" 2>/dev/null || echo 000)
+if [ "$HTTP" = "000" ]; then
     # 二次确认(防瞬时抖动误杀): 换协议参数再探一次
     sleep 5
-    HTTP2=\$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 6 --max-time 12 \"\$CUR_URL\" 2>/dev/null || echo 000)
-    if [ \"\$HTTP2\" = \"000\" ]; then
+    HTTP2=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 6 --max-time 12 "$CUR_URL" 2>/dev/null || echo 000)
+    if [ "$HTTP2" = "000" ]; then
+        if flapping; then
+            logger -t vpnplus-argo "Argo 频繁重连已触发冷却，跳过本次重启（防域名无限漂移）"
+            exit 0
+        fi
         restart_tunnel
         sleep 15
-        NEW_URL=\$(get_url)
-        if [ -n \"\$NEW_URL\" ] && [ \"\$NEW_URL\" != \"\$CUR_URL\" ]; then
+        NEW_URL=$(get_url)
+        if [ -n "$NEW_URL" ] && [ "$NEW_URL" != "$CUR_URL" ]; then
             refresh_sub
-            logger -t vpnplus-argo \"L2隧道僵死(HTTP 000x2)已重连换域名 \$CUR_URL -> \$NEW_URL, 订阅已同步\"
-        elif [ -n \"\$NEW_URL\" ]; then
+            logger -t vpnplus-argo "L2隧道僵死(HTTP 000x2)已重连换域名 $CUR_URL -> $NEW_URL, 订阅已同步"
+        elif [ -n "$NEW_URL" ]; then
             logger -t vpnplus-argo 'L2隧道僵死已重连(域名未变)'
         fi
         exit 0
@@ -508,21 +614,91 @@ if [ \"\$HTTP\" = \"000\" ]; then
 fi
 
 # L3: 隧道正常但订阅里还是旧域名(上次重连没同步成功) → 补同步
-if [ -n \"\$OLD_URL\" ] && grep -q 'trycloudflare' /etc/s-box/jhsub.txt 2>/dev/null; then
-    if ! grep -q \"\$(echo \"\$OLD_URL\" | sed 's|https://||')\" /etc/s-box/jhsub.txt 2>/dev/null; then
+if [ -n "$OLD_URL" ] && grep -q 'trycloudflare' /etc/s-box/jhsub.txt 2>/dev/null; then
+    if ! grep -q "$(echo "$OLD_URL" | sed 's|https://||')" /etc/s-box/jhsub.txt 2>/dev/null; then
         refresh_sub
         logger -t vpnplus-argo 'L3订阅与运行域名不一致, 已补同步'
     fi
 fi
 exit 0
-KEEP"
-    run chmod +x /usr/local/sbin/vpnplus-argo-keepalive.sh
-    if ! $DRY_RUN; then
+KEEP
+        chmod +x /usr/local/sbin/vpnplus-argo-keepalive.sh
         ( crontab -l 2>/dev/null | grep -vE 'vpnplus-argo-keepalive|acvn-argo-keepalive|acvpn-argo-keepalive'; echo '*/3 * * * * /usr/local/sbin/vpnplus-argo-keepalive.sh > /dev/null 2>&1' ) | crontab - 2>/dev/null || true
-    else
-        info "[dry-run] 写入 cron: vpnplus-argo-keepalive 每3分钟"
     fi
-    ok "Argo 保活 v2 已安装（每 3 分钟：进程+HTTP 双检，僵死自动重连换新域名并同步订阅）"
+    ok "Argo 保活 v3 已安装（每 3 分钟：flock互斥 + 进程/HTTP 双检 + 僵死重连换域名同步订阅 + 翻动冷却）"
+}
+
+# ── iptables 持久化（三层兜底 + 自建恢复 unit，防重启后端口跳跃/防探测规则丢失） ──
+# 背景（2026-08-25 审计）：旧实现第三层 iptables-save 只写文件、无开机加载，重启后 ACVPN_* 链丢失。
+# 现做两层保障：
+#   1) 优先用 netfilter-persistent 存储（Debian iptables-persistent，开机由 network-pre.target 自动恢复）
+#   2) 否则写 /etc/iptables/rules.v4|v6 并注册 vpnplus-netfilter-restore.service（network-pre.target 前恢复）
+persist_firewall() {
+    if $DRY_RUN; then info "[dry-run] 持久化 iptables 规则"; return 0; fi
+    local saved=false
+    if netfilter-persistent save 2>/dev/null && command -v netfilter-persistent >/dev/null 2>&1; then
+        ok "防火墙规则已持久化 (netfilter-persistent)"; saved=true
+    elif service iptables save 2>/dev/null; then
+        ok "防火墙规则已持久化 (iptables service)"; saved=true
+    fi
+    # 无论上述哪种成功，都额外保留一份明文快照 + 自建恢复 unit，双保险
+    mkdir -p /etc/iptables 2>/dev/null || true
+    iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
+    ip6tables-save > /etc/iptables/rules.v6 2>/dev/null || true
+    if [ -s /etc/iptables/rules.v4 ]; then
+        cat > /etc/systemd/system/vpnplus-netfilter-restore.service <<'UNIT'
+[Unit]
+Description=vpnplus iptables restore (before network)
+DefaultDependencies=no
+Before=network-pre.target
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/iptables-restore -n /etc/iptables/rules.v4
+ExecStart=/usr/sbin/ip6tables-restore -n /etc/iptables/rules.v6
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+        systemctl daemon-reload 2>/dev/null || true
+        if systemctl enable vpnplus-netfilter-restore.service 2>/dev/null; then
+            ok "vpnplus-netfilter-restore.service 已启用（开机恢复新链规则，双保险）"
+            saved=true
+        else
+            warn "enabling vpnplus-netfilter-restore.service 失败"
+        fi
+    fi
+    $saved || warn "防火墙规则未能持久化（重启后需重新配置）"
+    return 0
+}
+
+# ── 日志轮转（防 vpnplus 长期运行日志无限膨胀） ──
+setup_logrotate() {
+    if $DRY_RUN; then info "[dry-run] 安装 /etc/logrotate.d/vpnplus（轮转 vpnplus 各类日志）"; return 0; fi
+    cat > /etc/logrotate.d/vpnplus <<'ROT'
+/var/log/vpnplus-optimize.log
+/var/log/vpnplus-optimize-manifest.log
+/var/log/vpnplus-singbox-manifest.log
+/var/log/vpnplus-sbfeed.log
+/etc/s-box/argo.log
+{
+    weekly
+    rotate 4
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}
+ROT
+    chmod 0644 /etc/logrotate.d/vpnplus 2>/dev/null || true
+    # 若 logrotate 服务在则检查配置语法
+    command -v logrotate >/dev/null 2>&1 && logrotate -d /etc/logrotate.d/vpnplus >/dev/null 2>&1 \
+        && ok "日志轮转已配置 (/etc/logrotate.d/vpnplus，周轮+保留4份+压缩)" \
+        || warn "logrotate 配置已写，但语法校验未通过或 logrotate 未安装（日志将不轮转）"
+    return 0
 }
 
 # ── 订阅 HTTP 服务保障（busybox httpd；精确按端口定位，绝不杀全局 busybox） ──
@@ -621,56 +797,49 @@ apply_antiprobe() {
     for p in "${TCP_PORTS[@]}"; do
         [ "$p" = "$VM_PORT" ] && continue
         run iptables -A "$CHAIN_ANTIPROBE" -p tcp --dport "$p" -m state --state NEW -m hashlimit \
-          --hashlimit-above 50/sec --hashlimit-burst 100 --hashlimit-mode srcip --hashlimit-name "probe$i" -j DROP
+          --hashlimit-above "$RATE_SYN_ABOVE"/sec --hashlimit-burst "$RATE_SYN_BURST" --hashlimit-mode srcip --hashlimit-name "probe$i" -j DROP
         command -v ip6tables >/dev/null 2>&1 && run ip6tables -A "$CHAIN_ANTIPROBE" -p tcp --dport "$p" -m state --state NEW -m hashlimit \
-          --hashlimit-above 50/sec --hashlimit-burst 100 --hashlimit-mode srcip --hashlimit-name "probe$i" -j DROP || true
+          --hashlimit-above "$RATE_SYN_ABOVE"/sec --hashlimit-burst "$RATE_SYN_BURST" --hashlimit-mode srcip --hashlimit-name "probe$i" -j DROP || true
         i=$((i + 1))
     done
 
     # 3) UDP 代理主端口限速
     for p in "${UDP_PORTS[@]}"; do
         run iptables -A "$CHAIN_ANTIPROBE" -p udp --dport "$p" -m hashlimit \
-          --hashlimit-above 200/sec --hashlimit-burst 400 --hashlimit-mode srcip --hashlimit-name "probe$i" -j DROP
+          --hashlimit-above "$RATE_UDP_ABOVE"/sec --hashlimit-burst "$RATE_UDP_BURST" --hashlimit-mode srcip --hashlimit-name "probe$i" -j DROP
         command -v ip6tables >/dev/null 2>&1 && run ip6tables -A "$CHAIN_ANTIPROBE" -p udp --dport "$p" -m hashlimit \
-          --hashlimit-above 200/sec --hashlimit-burst 400 --hashlimit-mode srcip --hashlimit-name "probe$i" -j DROP || true
+          --hashlimit-above "$RATE_UDP_ABOVE"/sec --hashlimit-burst "$RATE_UDP_BURST" --hashlimit-mode srcip --hashlimit-name "probe$i" -j DROP || true
         i=$((i + 1))
     done
 
     # 4) UDP 跳跃段限速
-    run iptables -A "$CHAIN_ANTIPROBE" -p udp --dport 40000:42000 -m hashlimit \
-      --hashlimit-above 200/sec --hashlimit-burst 400 --hashlimit-mode srcip --hashlimit-name "probe$i" -j DROP
-    run iptables -A "$CHAIN_ANTIPROBE" -p udp --dport 43000:45000 -m hashlimit \
-      --hashlimit-above 200/sec --hashlimit-burst 400 --hashlimit-mode srcip --hashlimit-name "probe$i" -j DROP
+    run iptables -A "$CHAIN_ANTIPROBE" -p udp --dport "$HOP_HY_RANGE" -m hashlimit \
+      --hashlimit-above "$RATE_UDP_ABOVE"/sec --hashlimit-burst "$RATE_UDP_BURST" --hashlimit-mode srcip --hashlimit-name "probe$i" -j DROP
+    run iptables -A "$CHAIN_ANTIPROBE" -p udp --dport "$HOP_TU_RANGE" -m hashlimit \
+      --hashlimit-above "$RATE_UDP_ABOVE"/sec --hashlimit-burst "$RATE_UDP_BURST" --hashlimit-mode srcip --hashlimit-name "probe$i" -j DROP
     command -v ip6tables >/dev/null 2>&1 && {
-        run ip6tables -A "$CHAIN_ANTIPROBE" -p udp --dport 40000:42000 -m hashlimit --hashlimit-above 200/sec --hashlimit-burst 400 --hashlimit-mode srcip --hashlimit-name "probe$i" -j DROP || true
-        run ip6tables -A "$CHAIN_ANTIPROBE" -p udp --dport 43000:45000 -m hashlimit --hashlimit-above 200/sec --hashlimit-burst 400 --hashlimit-mode srcip --hashlimit-name "probe$i" -j DROP || true
+        run ip6tables -A "$CHAIN_ANTIPROBE" -p udp --dport "$HOP_HY_RANGE" -m hashlimit --hashlimit-above "$RATE_UDP_ABOVE"/sec --hashlimit-burst "$RATE_UDP_BURST" --hashlimit-mode srcip --hashlimit-name "probe$i" -j DROP || true
+        run ip6tables -A "$CHAIN_ANTIPROBE" -p udp --dport "$HOP_TU_RANGE" -m hashlimit --hashlimit-above "$RATE_UDP_ABOVE"/sec --hashlimit-burst "$RATE_UDP_BURST" --hashlimit-mode srcip --hashlimit-name "probe$i" -j DROP || true
     }; i=$((i + 2))
 
     # 5) SSH 爆破防御（轻量 fail2ban）
     run iptables -A "$CHAIN_ANTIPROBE" -p tcp --dport 22 -m state --state NEW -m hashlimit \
-      --hashlimit-above 3/min --hashlimit-burst 5 --hashlimit-mode srcip --hashlimit-name probe22 -j DROP
+      --hashlimit-above "$SSH_RATE_ABOVE"/min --hashlimit-burst "$SSH_RATE_BURST" --hashlimit-mode srcip --hashlimit-name probe22 -j DROP
     command -v ip6tables >/dev/null 2>&1 && run ip6tables -A "$CHAIN_ANTIPROBE" -p tcp --dport 22 -m state --state NEW -m hashlimit \
-      --hashlimit-above 3/min --hashlimit-burst 5 --hashlimit-mode srcip --hashlimit-name probe22 -j DROP || true
+      --hashlimit-above "$SSH_RATE_ABOVE"/min --hashlimit-burst "$SSH_RATE_BURST" --hashlimit-mode srcip --hashlimit-name probe22 -j DROP || true
 
     # 6) 单 IP 连接数上限
     for p in "${TCP_PORTS[@]}"; do
         [ "$p" = "$VM_PORT" ] && continue
-        run iptables -A "$CHAIN_ANTIPROBE" -p tcp --dport "$p" -m state --state NEW -m connlimit --connlimit-above 200 -j DROP
-        command -v ip6tables >/dev/null 2>&1 && run ip6tables -A "$CHAIN_ANTIPROBE" -p tcp --dport "$p" -m state --state NEW -m connlimit --connlimit-above 200 -j DROP || true
+        run iptables -A "$CHAIN_ANTIPROBE" -p tcp --dport "$p" -m state --state NEW -m connlimit --connlimit-above "$CONN_ABOVE" -j DROP
+        command -v ip6tables >/dev/null 2>&1 && run ip6tables -A "$CHAIN_ANTIPROBE" -p tcp --dport "$p" -m state --state NEW -m connlimit --connlimit-above "$CONN_ABOVE" -j DROP || true
     done
 
     # 将独立链挂到 INPUT 顶部（唯一跳到本链的规则，清理时精确删除）
     run iptables -I INPUT 1 -j "$CHAIN_ANTIPROBE"
     command -v ip6tables >/dev/null 2>&1 && run ip6tables -I INPUT 1 -j "$CHAIN_ANTIPROBE" || true
 
-    if netfilter-persistent save 2>/dev/null; then ok "防探测规则已持久化 (netfilter-persistent)"
-    elif service iptables save 2>/dev/null; then ok "防探测规则已持久化 (iptables service)"
-    elif command -v iptables-save >/dev/null 2>&1; then
-        mkdir -p /etc/iptables 2>/dev/null || true
-        run bash -c "iptables-save > /etc/iptables/rules.v4 2>/dev/null"
-        run bash -c "ip6tables-save > /etc/iptables/rules.v6 2>/dev/null || true"
-        ok "防探测规则已持久化 (iptables-save)"
-    else warn "无法持久化防探测规则"; fi
+    persist_firewall
     ok "防主动探测已启用: ${#TCP_PORTS[@]} TCP + ${#UDP_PORTS[@]} UDP + SSH + 单IP连接数上限 + IPv6对称（独立链 $CHAIN_ANTIPROBE）"
 }
 
@@ -679,11 +848,49 @@ main() {
     logo() { :; }
     if $DRY_RUN; then echo -e "${YELLOW}═══ DRY-RUN 模式：仅预览，不修改系统 ═══${N}"; fi
 
+    # 失败 trap：半成品状态下明确给出恢复指引，而不是带着半配置退出
+    trap_interrupt() {
+        local rc=$?
+        echo ""
+        fail "部署中断（最后退出码 $rc），可能残留半成品状态。"
+        info "修复与恢复："
+        info "  1) 先安全预览: bash cleanup.sh --force --dry-run —— 看会清哪些东西"
+        info "  2) 若只是刚才某步失败，可直接: bash deploy_singbox.sh 重跑（幂等）"
+        info "  3) 想彻底重建: bash cleanup.sh --force && bash deploy_singbox.sh"
+        info "  sb_feed 详细日志在 /var/log/vpnplus-sbfeed.log（本次 sb 交互输出，便于回溯卡点）"
+        return $rc
+    }
+    trap 'trap_interrupt' EXIT
+
     if [ -f "$CHECKPOINT" ] && [ -f /etc/s-box/sb.json ] && { systemctl is-active sb >/dev/null 2>&1 || systemctl is-active sing-box >/dev/null 2>&1 || systemctl is-active xr >/dev/null 2>&1; }; then
         ok "sing-box 已部署运行中，跳过安装"; info "强制重装: rm -f $CHECKPOINT && bash deploy_singbox.sh"; return 0
     fi
 
     check_env || return 1
+    # sb 菜单结构指纹：先抓一次 sb 主菜单横幅，确认菜单结构与脚本投喂序列预期一致
+    # 若 sb 已存在的版本与锁定的 SB_COMMIT 不符（比如用户手动升级过），菜单序号可能漂移，
+    # 静默继续会让安装"产物缺失才报错"很难排查。这里先探测，命中预期则继续，未命中则明确警告。
+    assert_sb_menu() {
+        [ -x /usr/bin/sb ] || return 0
+        local banner
+        banner=$(printf '0\n0\n' | timeout 10 bash /usr/bin/sb 2>&1 | sed -E 's/\x1B\[[0-9;]*[mK]//g' || true)
+        # 预期：部署脚本注释锁定的是 v2x 系列（sing-box-yg）。抓到版本号便于人工对表；
+        # 抓不到也继续（可能 sb 启动即进子菜单），但记录到日志供排查。
+        local ver
+        ver=$(printf '%s' "$banner" | grep -oE 'v[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1 || true)
+        if [ -n "$ver" ]; then
+            info "sb 版本指纹: $ver（脚本投喂序列按锁定 SB_COMMIT 编写）"
+            if ! printf '%s' "$ver" | grep -qE '^v2'; then
+                warn "sb 版本 $ver 不是脚本预期的 v2x 系列，菜单序号可能漂移；若后续步骤失败请核对 SB_COMMIT/SB_SHA256 并检查 /var/log/vpnplus-sbfeed.log"
+            fi
+        else
+            info "[sb] 未从横幅识别到版本号，继续（依赖 SB_SHA256 锁定的菜单结构）"
+        fi
+        manifest "sb banner probe ver=${ver:-none}"
+        return 0
+    }
+    if [ -f /etc/.vpnplus-singbox ]; then :; else assert_sb_menu; fi
+
     if $DRY_RUN; then
         echo -e "${YELLOW}═══ DRY-RUN 模式：仅预览，不修改系统 ═══${N}"
         info "[dry-run] 将执行：安装 sb.sh、生成订阅、配置端口跳跃、Argo、独立防火墙链、WARP"
@@ -716,6 +923,9 @@ main() {
     setup_warp
     setup_domain_routing
     show_subscription || true
+
+    step "7" "日志轮转 + 基线体检（可选）"
+    setup_logrotate
 
     # 仅核心成功才写成功标记
     if $DEPLOY_OK; then
