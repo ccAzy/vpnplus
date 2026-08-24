@@ -11,7 +11,7 @@
 set -euo pipefail
 
 SERVER_IP="${SERVER_IP:-${1:-}}"   # 兼容两种用法：SERVER_IP=x.x.x.x bash verify.sh 或 bash verify.sh x.x.x.x
-VMESS_LOCK="${VMESS_LOCK:-on}"
+VMESS_LOCK="${VMESS_LOCK:-off}"
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; N='\033[0m'
 ok()   { echo -e "${GREEN}[✓]${N}   $*"; }
 warn() { echo -e "${YELLOW}[!]${N}   $*"; }

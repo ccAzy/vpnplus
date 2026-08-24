@@ -15,7 +15,7 @@
 set -euo pipefail
 
 DRY_RUN=false
-VMESS_LOCK="${VMESS_LOCK:-on}"     # 安全默认：公网封锁明文 VMess 端口（仅 Argo 回环可达）
+VMESS_LOCK="${VMESS_LOCK:-off}"     # 用户明确不需要防火墙：vmess 明文端口公网直连（不再锁回环）
 for arg in "$@"; do
     case "$arg" in
         --dry-run) DRY_RUN=true ;;
@@ -23,7 +23,7 @@ for arg in "$@"; do
 vpnplus deploy_singbox.sh — sing-box 一键部署
 用法: bash deploy_singbox.sh [--dry-run]
   --dry-run  只打印将执行的动作，不实际修改系统
-  VMESS_LOCK=on|off  明文 VMess 端口是否封锁公网（默认 on，仅 Argo 回环可达）
+  VMESS_LOCK=on|off  明文 VMess 端口是否封锁公网（默认 off：直连，仅密钥登录无防火墙场景）
 HELP
         exit 0 ;;
     esac
@@ -500,7 +500,7 @@ apply_antiprobe() {
     local i=0
 
     # 1) VMess 明文端口：VMESS_LOCK=on 时公网 DROP（仅 Argo 回环可达）
-    if [ -n "$VM_PORT" ] && [ "${VMESS_LOCK:-on}" = "on" ]; then
+    if [ -n "$VM_PORT" ] && [ "${VMESS_LOCK:-off}" = "on" ]; then
         run iptables -A "$CHAIN_ANTIPROBE" -p tcp --dport "$VM_PORT" ! -i lo -j DROP
         command -v ip6tables >/dev/null 2>&1 && run ip6tables -A "$CHAIN_ANTIPROBE" -p tcp --dport "$VM_PORT" ! -i lo -j DROP || true
     fi

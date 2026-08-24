@@ -112,23 +112,21 @@ bash <(curl -fsSL https://raw.githubusercontent.com/ccAzy/vpnplus/main/deploy_si
 
 ---
 
-## 默认安全设置
+## 默认设置：不启用防火墙
 
 默认情况下：
 
 ```text
-VMESS_LOCK=on
+VMESS_LOCK=off
 ```
 
-明文 VMess 端口不会直接暴露公网，只允许 Argo 回环访问。
+明文 VMess 端口直接暴露公网（配合密钥登录/关闭密码登录已足够安全，不需要防火墙锁端口）。适合使用 6688 等非默认 SSH、仅密钥登录、无其他暴露面、希望节点全通的场景。
 
-如果你明确需要开放明文 VMess：
+如果你希望额外启用防主动探测（封锁明文 VMess 公网端口，仅 Argo 回环可达）：
 
 ```bash
-VMESS_LOCK=off bash deploy_singbox.sh
+VMESS_LOCK=on bash deploy_singbox.sh
 ```
-
-不建议新手关闭这个保护。
 
 ---
 

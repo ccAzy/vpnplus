@@ -25,7 +25,7 @@ description: >
 3. **内核强制校验**：SHA256SUMS 缺失/失败 → 中止，不降级照装。
 4. **核心/可选失败语义**：`install_singbox_yg`/`setup_subscription`/`start_argo` 失败记入 `DEPLOY_OK=false`，未完全成功不写 `/etc/.vpnplus-singbox`。
 5. **精确进程清理**：busybox 按监听端口定位 PID 停止，不 `pkill -x busybox` 杀全局。
-6. **安全默认**：`VMESS_LOCK` 默认 `on`（明文 VMess 端口公网 DROP，仅 Argo 回环可达）。
+6. **默认不启用防火墙**：`VMESS_LOCK` 默认 `off`（明文 VMess 端口公网直连，适合密钥登录+关闭密码登录、无多余暴露面的节点全通场景）。需要防主动探测时设 `VMESS_LOCK=on`（明文 VMess 公网 DROP，仅 Argo 回环可达）。
 7. **网络感知 sysctl**：仅当无 IPv6 全局地址才关 `accept_ra`。
 8. **dry-run + 备份**：两部署脚本 + cleanup 均支持 `--dry-run`；cleanup 前自动备份规则到 `/var/backups/vpnplus/`。
 9. **conntrack 协同调优**：`nf_conntrack_max` 按内存分级，并在模块支持时同步 hashsize，避免只增大表上限而放大桶冲突。
