@@ -13,13 +13,13 @@
 
 vpnplus 用来在 Debian/Ubuntu VPS 上快速部署代理节点，并自动完成：
 
-- BBRv3 和基础网络优化
+- BBRv3 和基础网络优化（幂等，重跑自动跳过）
 - sing-box 节点安装
 - VLESS、VMess、Hysteria2、Tuic5、AnyTLS 协议配置
-- Hysteria2/Tuic5 端口跳跃
-- Argo 临时隧道
+- Hysteria2/Tuic5 端口跳跃（重跑前自动清理过期跳跃段 NAT 残留）
+- Argo 临时隧道 + **三级自愈保活**：进程挂掉重启、隧道僵死探测后自动重连换新域名、新域名自动同步进订阅
 - WARP 域名分流
-- Clash/Mihomo、Sing-box 和通用订阅生成
+- Clash/Mihomo、Sing-box 和通用订阅生成（**订阅端口重跑保持不变**，客户端地址长期有效）
 - 防主动探测和安全清理
 
 建议 VPS 至少有 1GB 内存。512MB 也可以尝试，但同时运行 BBRv3、Argo、WARP 和 sing-box 时更容易内存不足。
@@ -96,19 +96,9 @@ bash <(curl -fsSL https://raw.githubusercontent.com/ccAzy/vpnplus/main/deploy_si
 
 把打印出的订阅链接导入以下客户端即可：
 
-- Clash Verge / Mihomo Party
+- Clash Verge / Mihomo Party / Karing / V2rayN
 - sing-box 客户端
 - 其他支持对应订阅格式的客户端
-
-> 当前仓库暂时是 Private，公开前远程命令会返回 HTTP 404。临时使用本地文件方式：
->
-> ```bash
-> cd /path/to/vpnplus
-> bash bootstrap.sh
-> bash deploy_optimize.sh
-> # 重启并重新连接后：
-> bash deploy_singbox.sh
-> ```
 
 ---
 
@@ -152,10 +142,11 @@ SERVER_IP="你的服务器IP" bash verify.sh
 - 持久化网络调优服务
 - TCP/UDP 端口监听
 - 端口跳跃链
+- **PREROUTING 是否有残留过期端口跳跃段**（防止 hy2/tuic 端口跳跃握手无响应）
 - 防主动探测链
-- VMess 明文端口锁定
-- Argo 隧道
-- 三种订阅链接
+- VMess 明文端口锁定（默认 off，开启时才会检查）
+- Argo 隧道（HTTP 4xx 视为可达，仅超时才报不可达，避免误报）
+- 三种订阅链接（含订阅端口是否可访问）
 - WARP 域名分流文件
 
 ---
@@ -184,6 +175,35 @@ journalctl -u vpnplus-net-tuning.service --no-pager
 /var/log/vpnplus-optimize-manifest.log
 /var/log/vpnplus-singbox-manifest.log
 ```
+
+---
+
+## 强制重跑部署
+
+需要重新执行一遍 sing-box 部署（如更换配置、恢复现场状态）时：
+
+```bash
+rm -f /etc/.vpnplus-singbox && bash deploy_singbox.sh
+```
+
+脚本已处理重跑稳定性的几个坑：
+
+- **不会卡死**：sb 菜单投喂有 timeout + 结束清理残留进程兜底
+- **订阅端口保持不变**：重跑复用已有订阅端口，客户端订阅地址长期有效
+- **幂等清理跳跃段 NAT 残留**：重跑前自动清掉过期端口跳跃规则，不影响 hy2/tuic
+- **重复跑安全**：BBRv3 等系统优化幂等，已生效自动跳过
+
+---
+
+## Argo 临时隧道自动恢复
+
+Argo 临时隧道（trycloudflare.com 域名）掉线或僵死时，服务器上的保活脚本（每 3 分钟）会自动处理：
+
+1. cloudflared 进程挂掉 → 自动重启
+2. 进程在但隧道探测无响应（连续两次 HTTP 失败，防误判）→ 判定僵死 → 自动重连
+3. 重连后换新域名 → 自动刷新本地订阅（jhsub/clmi/sbox 全部指向新域名）
+
+> 注意：临时隧道换域名后，客户端需要**重新拉一次订阅**才能拿到新域名。期望域名永久不变的话，可使用 Cloudflare 固定隧道（sb 菜单 3 → 3 → 2）。
 
 ---
 
@@ -265,10 +285,10 @@ curl -v http://127.0.0.1:订阅端口/token/clmi.yaml
 ## 重要限制
 
 - 服务器优化不能保证所有运营商线路都变快；绕路、丢包、拥塞和商家限速需要实际测速。
-- Argo 临时隧道没有固定 SLA，不等于永久稳定线路。
+- Argo 临时隧道没有固定 SLA，不等于永久稳定线路（已有自动保活，换域名后客户端需重新拉订阅）。
 - WARP 和域名分流属于可选增强功能，失败不一定代表核心节点部署失败。
 - Swap 主要用于小内存 VPS 防止 OOM，不会直接提升网速。
-- 完整的 BBRv3、sing-box、Argo、WARP 和客户端连通性仍需在真实 VPS 上验证。
+- 已在真实 VPS（Debian 12 / HK）端到端验证：5 个直连协议（vless/vmess/anytls/hy2/tuic）+ Argo 临时隧道节点客户端均可连通。
 
 ---
 
