@@ -14,6 +14,21 @@
 # ===================================================================
 set -euo pipefail
 
+# ── sb 菜单安全投喂：一次性喂完按键，timeout 限定，结束后强杀残留 sb 交互防孤儿 ──
+# 背景：sb（sing-box-yg）部分子菜单（如订阅 ipsub）完成操作后会 `sleep 3 && sb`
+#       递归拉起新 sb 面板。若是固定管道喂键，stdin 一旦耗尽，递归的 sb 会永远挂起等待，
+#       而 timeout 只杀最外层 → 留下孤儿 sb 进程，脚本被卡死等同"中断"。
+# 解决：包装所有 sb 菜单调用，末尾补多组 0（逐层返回/退出），超时后 pkill 清理全部 sb 残留。
+sb_feed() {  # sb_feed <超时秒数> - <<'KEYS'  ... KB: 用 stdin 传入按键
+    local secs="${1:-120}"; shift
+    local out
+    out=$(timeout "$secs" sb "$@" 2>&1 || true) || true
+    # 无论 sb 是否正常返回，结束后兜底清理该脚本会话可能遗留的孤儿 sb 交互
+    pkill -9 -f 'bash /usr/bin/sb' 2>/dev/null || true
+    pkill -9 -f 'bash.*/usr/bin/sb' 2>/dev/null || true
+    printf '%s' "$out"
+}
+
 DRY_RUN=false
 VMESS_LOCK="${VMESS_LOCK:-off}"     # 用户明确不需要防火墙：vmess 明文端口公网直连（不再锁回环）
 for arg in "$@"; do
@@ -86,7 +101,7 @@ install_singbox_yg() {
     run systemctl daemon-reload || true
     # 安装流程: 1 → ''(开放端口) → ''(最新内核) → ''(自签) → ''(随机端口) → ''(不共用)
     if ! $DRY_RUN; then
-        printf '1\n\n\n\n\n' | timeout 300 sb 2>&1 || { warn "sb 安装菜单执行异常"; }
+        printf '1\n\n\n\n\n0\n0\n0\n' | sb_feed 300 || { warn "sb 安装菜单执行异常"; }
     else
         info "[dry-run] printf '1\\n\\n\\n\\n\\n' | timeout 300 sb"
     fi
@@ -136,12 +151,19 @@ setup_subscription() {
     info "配置本地订阅链接..."
     sleep 1
     if ! $DRY_RUN; then
-        timeout 120 sb 2>&1 <<-EOSUB || { warn "订阅配置菜单执行异常"; return 1; }
+        # 投喂序列对齐当前 sb 菜单（v26.x）：
+        #   main changeserv(配置变更) → 8(设置本地IP订阅) → 1(重置安装) →
+        #   \n(路径密码=当前UUID) → \n(端口随机) → 尾部补足 0 逐层返回/退出
+        # 即便中间 sleep 3 递归拉起新 sb 面板，sb_feed 的 timeout+pkill 也会兜底清理，绝不卡死。
+        sb_feed 150 <<-EOSUB || true
 3
 8
 1
 
 
+0
+0
+0
 0
 0
 EOSUB
@@ -150,7 +172,8 @@ EOSUB
         info "[dry-run] sb 菜单 3-8-1 配置订阅"
     fi
     if [ -f /etc/s-box/subport.log ] && [ -f /etc/s-box/subtoken.log ]; then
-        ok "订阅配置成功"; return 0
+        ok "订阅配置成功"
+        return 0
     fi
     warn "订阅配置产物未生成（sb 菜单结构可能已变更）"; info "手动: sb → 3 → 8 → 1"
     return 1
@@ -241,10 +264,12 @@ setup_warp() {
 
     info "安装 WARP-plus-Socks5 代理..."
     if ! $DRY_RUN; then
-        timeout 120 sb 2>&1 <<-EOSUB || true
+        sb_feed 120 <<-EOSUB || true
 14
 1
 
+0
+0
 0
 0
 EOSUB
@@ -263,11 +288,13 @@ setup_domain_routing() {
     fi
     info "配置域名分流（WARP-socks5-ipv4 优先）..."
     if ! $DRY_RUN; then
-        timeout 120 sb 2>&1 <<-EOSUB || true
+        sb_feed 120 <<-EOSUB || true
 5
 3
 1
 openai.com chatgpt.com oaistatic.com aistatic.com claude.ai anthropic.com gemini.google.com perplexity.ai huggingface.co netflix.com nflxvideo.net youtube.com ytimg.com googlevideo.com google.com googleapis.com gstatic.com bing.com twitter.com x.com
+0
+0
 0
 0
 EOSUB
@@ -285,11 +312,13 @@ start_argo() {
     [ -f /etc/s-box/sb.json ] || { warn "sb.json 不存在，跳过 Argo"; return 1; }
     info "通过 sb-yg 自动配置 Argo 临时隧道..."
     if ! $DRY_RUN; then
-        timeout 90 sb 2>&1 <<-EOSUB || true
+        sb_feed 90 <<-EOSUB || true
 3
 3
 1
 1
+0
+0
 0
 EOSUB
     else
@@ -399,7 +428,8 @@ nohup /etc/s-box/cloudflared tunnel --url \"http://localhost:\$WS_PORT\" \\
   \$(cat /etc/s-box/argo-extra.conf 2>/dev/null) > \"\$LOG\" 2>&1 &
 sleep 15
 if pgrep -f 'cloudflared.*tunnel.*localhost' >/dev/null 2>&1; then
-    printf '9\\n1\\n' | bash /usr/bin/sb > /dev/null 2>&1 || true
+    printf '9\\n1\\n0\\n0\\n0\\n' | timeout 30 bash /usr/bin/sb > /dev/null 2>&1 || true
+    pkill -9 -f 'bash /usr/bin/sb' 2>/dev/null || true
     logger -t vpnplus-argo '临时隧道掉线后已自动重启并刷新订阅'
 fi
 exit 0
