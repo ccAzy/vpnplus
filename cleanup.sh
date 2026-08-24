@@ -138,7 +138,8 @@ kill_procs() {
     echo "--- 终止进程 ---"
     run pkill -15 -f sing-box || true
     sleep 2
-    for proc in sing-box 'cloudflared.*tunnel.*url.*localhost'; do
+    # 临时 Argo 隧道统一匹配口径（与 deploy_singbox keepalive 一致：cloudflared + tunnel + --url）
+    for proc in sing-box 'cloudflared.*tunnel.*--url'; do
         if pgrep -f "$proc" &>/dev/null; then
             run pkill -9 -f "$proc" || true; ok "已终止: $proc"
         fi
@@ -189,7 +190,8 @@ rm_units() {
                 /etc/systemd/system/cloudflared-update.service \
                 /etc/systemd/system/cloudflared-update.timer \
                 /etc/systemd/system/acvpn-rss.service \
-                /etc/systemd/system/vpnplus-net-tuning.service; do
+                /etc/systemd/system/vpnplus-net-tuning.service \
+                /etc/systemd/system/vpnplus-netfilter-restore.service; do
         if [ -f "$unit" ]; then
             # 只删除明确属于 vpnplus/旧 ACVPN 的 unit；不因同名而删除其他 cloudflared 服务。
             if [ "$(basename "$unit")" = "acvpn-rss.service" ] || grep -qE '/etc/s-box|/root/websbox|vpnplus|ACVPN' "$unit" 2>/dev/null; then
@@ -206,8 +208,13 @@ rm_units() {
 rm_files() {
     echo "--- 清理文件和目录 ---"
     local COUNT=0
-    for path in /etc/s-box /usr/bin/sb /root/websbox /usr/local/sbin/acvpn-argo-keepalive.sh \
-                /usr/local/sbin/vpnplus-net-tuning.sh; do
+    for path in /etc/s-box /usr/bin/sb /root/websbox \
+                /usr/local/sbin/acvpn-argo-keepalive.sh \
+                /usr/local/sbin/vpnplus-argo-keepalive.sh \
+                /usr/local/sbin/vpnplus-net-tuning.sh \
+                /var/lock/vpnplus-argo-keepalive.lock \
+                /etc/iptables/rules.v4 /etc/iptables/rules.v6 \
+                /etc/logrotate.d/vpnplus; do
         if [ -e "$path" ]; then
             run rm -rf "$path"; COUNT=$((COUNT + 1)); ok "已删除: $path"
         fi
@@ -256,6 +263,8 @@ verify_clean() {
     local PASS=0 FAIL=0
     if ! systemctl is-active sing-box &>/dev/null && [ ! -f /etc/systemd/system/sing-box.service ]; then ok "sing-box 服务已清除"; PASS=$((PASS+1)); else warn "sing-box 服务仍存在"; FAIL=$((FAIL+1)); fi
     [ ! -d /etc/s-box ] && { ok "/etc/s-box 已删除"; PASS=$((PASS+1)); } || { warn "/etc/s-box 仍存在"; FAIL=$((FAIL+1)); }
+    [ ! -f /etc/systemd/system/vpnplus-netfilter-restore.service ] && { ok "vpnplus-netfilter-restore.service 已删除"; PASS=$((PASS+1)); } || { warn "vpnplus-netfilter-restore.service 仍存在"; FAIL=$((FAIL+1)); }
+    [ ! -f /usr/local/sbin/vpnplus-argo-keepalive.sh ] && { ok "Argo 保活脚本已删除"; PASS=$((PASS+1)); } || { warn "vpnplus-argo-keepalive.sh 仍存在"; FAIL=$((FAIL+1)); }
     if iptables -L "$CHAIN_ANTIPROBE" -n >/dev/null 2>&1 || iptables -t nat -L "$CHAIN_PORTHOP" -n >/dev/null 2>&1; then
         warn "vpnplus 独立防火墙链仍存在"; FAIL=$((FAIL+1))
     else
@@ -266,7 +275,8 @@ verify_clean() {
     else
         ok "crontab 无 sb 条目"; PASS=$((PASS+1))
     fi
-    remaining=$(pgrep -fc 'sing-box|cloudflared.*tunnel.*url' 2>/dev/null || echo 0)
+    # 注意：pgrep -c 会把自己的 shell 也算进 /bin/bash 匹配，用 -f + 精确进程名排除干扰
+    remaining=$(pgrep -f 'sing-box|cloudflared.*tunnel.*--url' 2>/dev/null | wc -l)
     if [ "$remaining" -eq 0 ]; then ok "进程已清理"; PASS=$((PASS+1)); else warn "仍有 ${remaining} 个进程"; FAIL=$((FAIL+1)); fi
 
     echo ""

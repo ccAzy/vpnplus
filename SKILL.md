@@ -29,6 +29,9 @@ description: >
 7. **网络感知 sysctl**：仅当无 IPv6 全局地址才关 `accept_ra`。
 8. **dry-run + 备份**：两部署脚本 + cleanup 均支持 `--dry-run`；cleanup 前自动备份规则到 `/var/backups/vpnplus/`。
 9. **conntrack 协同调优**：`nf_conntrack_max` 按内存分级，并在模块支持时同步 hashsize，避免只增大表上限而放大桶冲突。
+10. **iptables 持久化双保险**：端口跳跃/防探测规则除 netfilter-persistent 外，额外落盘 `/etc/iptables/rules.v4|v6` 并注册 `vpnplus-netfilter-restore.service`（network-pre.target 前恢复），防重启后 `ACVPN_*` 链丢失。
+11. **Argo 保活 v3**：flock 互斥 + 进程口径统一（`cloudflared+tunnel+--url`）+ cloudflared 路径自动探测 + 翻动检测冷却（防域名无限漂移）；纯单引号 heredoc 直写，消除 bash -c 双层转义风险。
+12. **sb.sh 哈希复审**：重跑时即使 sb 存在也校验哈希（原版或补丁白名单 `SB_PATCH_MARKER`），不在可信集合则重新下载。
 
 ## 部署流程（从第一步开始）
 
@@ -74,12 +77,13 @@ curl -fsSL https://raw.githubusercontent.com/ccAzy/vpnplus/main/deploy_singbox.s
 ```
 
 自动完成：
-1. 安装 sing-box-yg 管理脚本（**锁定 commit + SHA256 校验**）
+1. 安装 sing-box-yg 管理脚本（**锁定 commit + SHA256 校验**，重跑亦复审哈希）
 2. 配置订阅链接（Clash / Sbox / 通用聚合）
 3. 配置 Hysteria2 端口跳跃（40000-42000）+ Tuic 端口跳跃（43000-45000）→ 独立链 `ACVPN_PORTHOP`
-4. 启动 Argo 临时隧道（Cloudflare CDN 隐藏 IP）
-5. 应用安全加固（独立链 `ACVPN_ANTIPROBE` + 网络感知 sysctl）
+4. 启动 Argo 临时隧道（Cloudflare CDN 隐藏 IP）+ **三级保活 v3**（flock 互斥/进程+HTTP双检/僵死重连/翻动冷却）
+5. 应用安全加固（独立链 `ACVPN_ANTIPROBE` + 网络感知 sysctl + **iptables 双保险持久化**）
 6. WARP + 域名分流（可选，失败不影响核心）
+7. 日志轮转（`/etc/logrotate.d/vpnplus`）
 
 ### 第 3 步：协议不通？重启服务器
 

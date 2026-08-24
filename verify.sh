@@ -67,9 +67,20 @@ if [ -n "$IFACE" ] && command -v tc >/dev/null 2>&1; then
 fi
 if systemctl is-active --quiet vpnplus-net-tuning.service 2>/dev/null; then
     ok "持久化网络调优服务运行中"; PASS=$((PASS + 1))
+    systemctl is-enabled --quiet vpnplus-net-tuning.service 2>/dev/null && ok "网络调优服务已启用(开机自启)" || warn "网络调优服务未 enable"
 else
     warn "持久化网络调优服务未运行（可能尚未执行 deploy_optimize.sh）"
 fi
+
+# 防火墙持久化恢复单元（#2026-08-25：防重启后 ACVPN_* 链丢失）
+if [ -f /etc/systemd/system/vpnplus-netfilter-restore.service ]; then
+    ok "vpnplus-netfilter-restore.service 存在"; PASS=$((PASS + 1))
+    systemctl is-enabled --quiet vpnplus-netfilter-restore.service 2>/dev/null && ok "防火墙恢复单元已启用" || warn "防火墙恢复单元未 enable"
+else
+    warn "未检测到 vpnplus-netfilter-restore.service（重启后端口跳跃/防探测规则可能不自动恢复）"
+fi
+# 日志轮转配置
+if [ -f /etc/logrotate.d/vpnplus ]; then ok "日志轮转配置存在"; PASS=$((PASS + 1)); else warn "未检测到 logrotate 配置"; fi
 
 # 2. 进程
 echo "--- 进程检查 ---"
@@ -89,6 +100,7 @@ if ss -ulnp 2>/dev/null | grep -q sing-box; then ok "UDP 端口监听正常（Hy
 # 独立命名链存在性（vpnplus 防火墙设计核心）
 if iptables -t nat -L "$CHAIN_PORTHOP" -n >/dev/null 2>&1; then ok "端口跳跃链 ${CHAIN_PORTHOP:-ACVPN_PORTHOP} 存在"; PASS=$((PASS + 1)); else warn "端口跳跃链不存在（可能未配置端口跳跃）"; fi
 # PREROUTING 是否残留指向过期端口的孤立跳跃段规则（会导致 hy2/tuic 端口跳跃握手无响应）
+# 注意：40000:42000 / 43000:45000 与 deploy_singbox.sh 顶部的 HOP_HY_RANGE / HOP_TU_RANGE 保持同步
 HOP_LEAK=$(iptables -t nat -L PREROUTING -n --line-numbers 2>/dev/null | grep -E "DNAT|REDIRECT" | grep -E "40000:42000|43000:45000" | grep -v "ACVPN_PORTHOP" | head -1 || true)
 if [ -n "$HOP_LEAK" ]; then warn "检测到 PREROUTING 残留过期端口跳跃规则: $HOP_LEAK（重跑 deploy_singbox.sh 会自动清理）"; else ok "PREROUTING 无残留端口跳跃段"; PASS=$((PASS + 1)); fi
 if iptables -L "$CHAIN_ANTIPROBE" -n >/dev/null 2>&1; then ok "防探测链 ${CHAIN_ANTIPROBE:-ACVPN_ANTIPROBE} 存在"; PASS=$((PASS + 1)); else warn "防探测链不存在"; fi
@@ -118,6 +130,15 @@ if [ -f /etc/s-box/argo.log ]; then
     fi
 else
     fail "/etc/s-box/argo.log 不存在"; FAIL=$((FAIL + 1))
+fi
+
+# Argo 自愈保活（v3）：脚本存在 + cron 每 3 分钟 + flock 依赖可用
+if [ -x /usr/local/sbin/vpnplus-argo-keepalive.sh ]; then
+    ok "Argo 保活脚本存在"; PASS=$((PASS + 1))
+    if crontab -l 2>/dev/null | grep -q 'vpnplus-argo-keepalive'; then ok "保活 cron 已注册(每3分钟)"; PASS=$((PASS + 1)); else warn "保活 cron 未注册"; fi
+    command -v flock >/dev/null 2>&1 && ok "flock 可用(保活互斥)" || warn "flock 缺失(util-linux)";
+else
+    warn "Argo 保活脚本不存在（重跑 deploy_singbox.sh 可重建）"
 fi
 
 # 5. 订阅链接
