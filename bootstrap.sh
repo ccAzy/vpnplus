@@ -93,4 +93,17 @@ else
     ok "部署所需基础命令已可用"
 fi
 
+# ── IPv4 优先（防 raw.githubusercontent 等 v6 黑洞导致 curl 卡 75s） ──
+if $CHECK_ONLY; then
+    grep -q 'precedence ::ffff:0:0/96 100' /etc/gai.conf 2>/dev/null && ok "gai.conf 已设 IPv4 优先" || warn "gai.conf 未设 IPv4 优先（建议：precedence ::ffff:0:0/96 100）"
+elif $DRY_RUN; then
+    grep -q 'precedence ::ffff:0:0/96 100' /etc/gai.conf 2>/dev/null && info "[dry-run] gai.conf 已是 IPv4 优先，跳过" || info "[dry-run] 将写入 /etc/gai.conf：precedence ::ffff:0:0/96 100（IPv4 优先）"
+else
+    if grep -q 'precedence ::ffff:0:0/96 100' /etc/gai.conf 2>/dev/null; then
+        ok "gai.conf 已设 IPv4 优先"
+    else
+        echo 'precedence ::ffff:0:0/96 100' >> /etc/gai.conf 2>/dev/null && ok "已设 IPv4 优先（/etc/gai.conf）" || warn "写入 /etc/gai.conf 失败（IPv4 优先未生效）"
+    fi
+fi
+
 info "bootstrap 只准备环境；下一步执行 deploy_optimize.sh"
