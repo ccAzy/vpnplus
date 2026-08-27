@@ -94,6 +94,14 @@ if [ -f /etc/logrotate.d/vpnplus ]; then ok "日志轮转配置存在"; PASS=$((
 echo "--- sing-box 兼容 ---"
 if grep -q "ENABLE_DEPRECATED_LEGACY_DOMAIN_STRATEGY_OPTIONS" /etc/systemd/system/sing-box.service.d/99-vpnplus.conf 2>/dev/null; then ok "sing-box legacy env 已注入"; PASS=$((PASS+1)); else warn "sing-box legacy env 缺失（1.12+ 会 FATAL 崩溃，需 ensure_singbox_legacy_env）"; fi
 if grep -q "^precedence ::ffff:0:0/96 100" /etc/gai.conf 2>/dev/null && [ "$(grep -c "^precedence ::ffff:0:0/96 100" /etc/gai.conf 2>/dev/null)" -eq 1 ]; then ok "gai.conf IPv4 优先单行"; PASS=$((PASS+1)); else warn "gai.conf 重复或缺失 precedence ::ffff:0:0/96 100（去重后应为单行）"; fi
+# IPv4 强制锁定校验（JP/HK v6 绕美国导致 200ms，锁定后 CN2 v4 100ms）
+if [ -f /etc/s-box/sb.json ]; then
+    _ipv4_bad=""
+    _ipv4_bad+=$(jq -r '.route.rules[]? | select(.strategy != null and .strategy != "ipv4_only") | .strategy' /etc/s-box/sb.json 2>/dev/null | head -1 || true)
+    _ipv4_bad+=$(jq -r '.outbounds[]? | select(.type=="direct" or .type=="socks") | select(.domain_strategy != "ipv4_only") | .type+":"+(.domain_strategy//"null")' /etc/s-box/sb.json 2>/dev/null | head -1 || true)
+    _ipv4_bad+=$(jq -r '.dns.strategy? // empty | select(. != "ipv4_only")' /etc/s-box/sb.json 2>/dev/null | head -1 || true)
+    if [ -z "$_ipv4_bad" ]; then ok "IPv4 锁定 ipv4_only 已生效（route/outbounds/dns）"; PASS=$((PASS+1)); else warn "IPv4 未锁定: $_ipv4_bad 仍非 ipv4_only，需重跑 force_ipv4_lock"; fi
+else warn "sb.json 不存在，跳过 IPv4 锁定校验"; fi
 
 # 1b. 时间同步（P0：Reality/VMess 握手对时，漂移>90s 全不通，但端口照常通）
 if declare -F verify_time >/dev/null 2>&1; then verify_time; else

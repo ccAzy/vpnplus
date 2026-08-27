@@ -67,7 +67,7 @@ fix_mport_dup() {
         # 仅当出现重复逗号段时处理
         if grep -q 'mport=' "$f" 2>/dev/null && grep -q 'mport=.*,' "$f" 2>/dev/null; then
             local tmp
-            tmp=$(mktemp)
+            tmp=$(mktemp /tmp/vpnplus-mport.XXXXXX)
             # 逐行：把 mport= 后的逗号列表去重（保留首次出现顺序）
             python3 - "$f" "$tmp" <<'PY' 2>/dev/null || true
 import sys, re

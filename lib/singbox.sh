@@ -147,6 +147,49 @@ apply_argo_patch() {
     return 0
 }
 
+# ── IPv4 强制锁定（压延迟：JP/HK v6 绕美国 → 200ms，v4 直连 CN2 100ms）──
+# 幂等：route.rules 任意 strategy → ipv4_only；direct/socks outbound 强制 ipv4_only；dns 强制 ipv4_only
+# 背景：sb-yg 订阅/分流/WARP 每次重建 sb.json 都会把 strategy 重置为 prefer_ipv4，
+# 若仅跑一次 force_ipv4_lock，后续手动 sb 更新订阅会回退到 v6。需每次 sb 操作后重锁。
+force_ipv4_lock() {
+    info "锁定 IPv4（直连/WARP/DNS 强制 ipv4_only，压延迟）..."
+    if [ ! -f /etc/s-box/sb.json ]; then warn "sb.json 不存在，跳过 IPv4 锁定"; return 0; fi
+    if ${DRY_RUN:-false}; then info "[dry-run] 将把 sb.json 的 prefer_ipv4/strategy → ipv4_only 并重载"; return 0; fi
+    if declare -F ensure_singbox_legacy_env >/dev/null 2>&1; then ensure_singbox_legacy_env || true; fi
+    local changed=false
+    cp /etc/s-box/sb.json /etc/s-box/sb.json.bak.ipv4 2>/dev/null || true
+    # 单次 jq 原子改：route.rules[].strategy + dns.strategy/dns.servers[].strategy + outbounds direct/socks
+    if jq '
+        (.route.rules[]? | select(.strategy != null) | .strategy) = "ipv4_only"
+        | (.dns.strategy? | select(. != null)) = "ipv4_only"
+        | (.dns.servers[]? | select(.strategy != null) | .strategy) = "ipv4_only"
+        | (.outbounds[]? | select(.type=="direct" or .type=="socks") | .domain_strategy) = "ipv4_only"
+    ' /etc/s-box/sb.json > /tmp/sb.json.tmp 2>/dev/null && [ -s /tmp/sb.json.tmp ]; then
+        # 仅当内容有变化才覆盖（避免无意义重启）
+        if ! cmp -s /etc/s-box/sb.json /tmp/sb.json.tmp 2>/dev/null; then
+            cat /tmp/sb.json.tmp > /etc/s-box/sb.json
+            changed=true
+            ok "route/outbounds/dns 策略已切 ipv4_only"
+        fi
+        rm -f /tmp/sb.json.tmp
+    else
+        warn "IPv4 锁定 jq 失败，保持原 sb.json"
+        rm -f /tmp/sb.json.tmp 2>/dev/null || true
+        return 1
+    fi
+    if ! jq empty /etc/s-box/sb.json 2>/dev/null; then
+        warn "sb.json JSON 校验失败，回滚备份"
+        cp /etc/s-box/sb.json.bak.ipv4 /etc/s-box/sb.json 2>/dev/null || true
+        return 1
+    fi
+    if $changed; then
+        systemctl try-restart sing-box 2>/dev/null || systemctl restart sing-box 2>/dev/null || true; sleep 2
+        if systemctl is-active sing-box >/dev/null 2>&1; then ok "IPv4 锁定完成，已重载 sing-box"; else warn "IPv4 锁定后 sing-box 未运行，请检查 journalctl -u sing-box"; fi
+    else
+        info "已是 ipv4_only，无需变更"
+    fi
+}
+
 # sing-box 1.12+ legacy domain_strategy 兼容：必须注入环境变量否则 FATAL
 ensure_singbox_legacy_env() {
     local dropin="/etc/systemd/system/sing-box.service.d/99-vpnplus.conf"
