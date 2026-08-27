@@ -17,6 +17,14 @@
 # ===================================================================
 set -euo pipefail
 
+# lib 加载（保持单文件可独立运行）
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+for _lib in common firewall; do
+    if [ -f "$SCRIPT_DIR/lib/${_lib}.sh" ]; then source "$SCRIPT_DIR/lib/${_lib}.sh" 2>/dev/null || true
+    elif [ -f "lib/${_lib}.sh" ]; then source "lib/${_lib}.sh" 2>/dev/null || true
+    fi
+done
+
 FORCE=""
 DRY_RUN=false
 for arg in "$@"; do
@@ -59,6 +67,7 @@ if [ "$FORCE" != "--force" ]; then
 fi
 
 # ———————— 0. 备份当前防火墙规则（清理前快照，可回滚） ————————
+if ! declare -F bak_firewall >/dev/null 2>&1; then
 bak_firewall() {
     echo "--- 备份防火墙规则 ---"
     run mkdir -p "$BAK_DIR"
@@ -73,9 +82,11 @@ bak_firewall() {
         run bash -c "nft list ruleset > '$BAK_DIR/nftables.$stamp' 2>/dev/null || true"
     fi
 }
+fi
 
 # ———————— 仅删除 vpnplus 自己的独立链（不碰第三方规则） ————————
 # 关键改进：不 grep INPUT 链全局匹配删除，只处理 ACVPN_* 命名链。
+if ! declare -F clean_chains >/dev/null 2>&1; then
 clean_chains() {
     echo "--- 清理 vpnplus 独立防火墙链 ---"
     # 1) 先从主链移除 vpnplus 的跳转规则（精确匹配 jump 到命名链，绝不误伤其他规则）
@@ -114,6 +125,7 @@ clean_chains() {
     }
     ok "独立防火墙链已清理（未触碰第三方规则）"
 }
+fi
 
 # ———————— 1-5：停止服务 / 杀进程 / 清 crontab / 删 unit / 删目录 ————————
 # （与 ACVPN 相同，但 crontab 处理修复了 set -e 退出问题）
