@@ -463,15 +463,31 @@ if ! declare -F force_ipv4_lock >/dev/null 2>&1; then
 force_ipv4_lock() {
     info "切换入口IP为 IPv4（SB 15-1）..."
     if [ ! -f /etc/s-box/sb.json ]; then warn "sb.json 不存在，跳过"; return 0; fi
-    if $DRY_RUN; then info "[dry-run] 将执行 SB 15-1 切换入口为 IPv4"; return 0; fi
+    if ${DRY_RUN:-false}; then info "[dry-run] 将执行 SB 15-1 切换入口为 IPv4"; return 0; fi
     if declare -F ensure_singbox_legacy_env >/dev/null 2>&1; then ensure_singbox_legacy_env || true; fi
+    # SB 15-1：刷新本地IP并选 IPv4 输出（回车默认即 IPv4）
+    # 入口IP核心切换(ipuuid写server_ip.log)必然完成；sbshare重生成订阅耗时较长，
+    # 给足 90s 超时并在其后校验订阅文件 server: 已同步 v4，未同步则提示下轮重试
     if command -v sb >/dev/null 2>&1; then
-        printf "15\n1\n" | sb_feed 30 2>&1 | tail -n 5 || true
-        sleep 2
-        local cur_ip; cur_ip=$(cat /etc/s-box/server_ip.log 2>/dev/null || true)
-        if echo "$cur_ip" | grep -q "^[0-9]"; then ok "入口IP已切 IPv4 ($cur_ip)"; else warn "入口IP仍非 IPv4 ($cur_ip)，请手动 sb→15→1"; fi
-    else warn "sb 不存在，跳过入口切换"; fi
-    local bad; bad=$(jq -r '.route.rules[]? | select(.strategy != null and .strategy != "ipv4_only") | .strategy' /etc/s-box/sb.json 2>/dev/null | head -1 || true)
+        printf "15\n1\n" | sb_feed 90 2>&1 | tail -n 5 || true
+        sleep 3
+        local cur_ip
+        cur_ip=$(cat /etc/s-box/server_ip.log 2>/dev/null || true)
+        if echo "$cur_ip" | grep -q "^[0-9]"; then
+            ok "入口IP已切 IPv4 ($cur_ip)"
+            # 校验订阅文件 server: 已同步为 v4（sbshare 可能因超时未完成）
+            if grep -qE 'server: .*\[' /etc/s-box/clmi.yaml 2>/dev/null; then
+                warn "订阅 server: 仍为 IPv6 入口，sbshare 可能未在超时内完成，建议重跑 bash deploy_singbox.sh --force"
+            else ok "订阅 server: 已同步 IPv4 入口"; fi
+        else warn "入口IP仍非 IPv4 ($cur_ip)，请手动 sb→15→1"; fi
+        # 打印当前订阅地址（端口可能因 sbshare 重生成而变）
+        if declare -F show_subscription >/dev/null 2>&1; then show_subscription || true; fi
+    else
+        warn "sb 不存在，跳过入口切换"
+    fi
+    # 出口校验：1.13 无 SB 菜单，仅 --force 时才动库（带备份校验），平时只告警
+    local bad
+    bad=$(jq -r '.route.rules[]? | select(.strategy != null and .strategy != "ipv4_only") | .strategy' /etc/s-box/sb.json 2>/dev/null | head -1 || true)
     bad+=$(jq -r '.outbounds[]? | select((.type=="direct" or .type=="socks") and .domain_strategy != "ipv4_only") | .domain_strategy // "null"' /etc/s-box/sb.json 2>&1 | head -1 || true)
     if [ -n "$bad" ]; then
         if ${FORCE:-false}; then

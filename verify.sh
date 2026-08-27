@@ -102,6 +102,11 @@ if [ -f /etc/s-box/sb.json ]; then
     _ipv4_bad+=$(jq -r '.dns.strategy? // empty | select(. != "ipv4_only")' /etc/s-box/sb.json 2>/dev/null | head -1 || true)
     if [ -z "$_ipv4_bad" ]; then ok "IPv4 锁定 ipv4_only 已生效（route/outbounds/dns）"; PASS=$((PASS+1)); else warn "IPv4 未锁定: $_ipv4_bad 仍非 ipv4_only，需重跑 force_ipv4_lock"; fi
 else warn "sb.json 不存在，跳过 IPv4 锁定校验"; fi
+# 入口IP（订阅 server:）校验：server_ip.log 应为 IPv4，否则订阅入口仍是 v6，verify 会漏报
+if [ -f /etc/s-box/server_ip.log ]; then
+    _srv=$(cat /etc/s-box/server_ip.log 2>/dev/null | tr -d '[]' | tr -d '\r\n')
+    if echo "$_srv" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then ok "订阅入口IP已切 IPv4 ($_srv)"; PASS=$((PASS+1)); else warn "订阅入口仍非 IPv4 ($_srv)，建议 sb→15→1 或 bash deploy_singbox.sh --force"; fi
+else warn "server_ip.log 不存在，跳过入口IP校验"; fi
 
 # 1b. 时间同步（P0：Reality/VMess 握手对时，漂移>90s 全不通，但端口照常通）
 if declare -F verify_time >/dev/null 2>&1; then verify_time; else

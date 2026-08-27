@@ -19,18 +19,20 @@ inline_lib() {
 # 校验：单文件必须包含 lib 对应逻辑（保证改 lib 后单文件同步，否则低成本变更失效）
 check_sync() {
     local ok=true
-    for lib in lib/common.sh lib/time.sh lib/optimize.sh; do
-        local base
-        base=$(basename "$lib")
-        # 取 lib 关键函数名，检查单文件是否包含
+    # lib/*.sh 每个函数应出现在至少一个单文件（deploy/verify/cleanup/bootstrap），
+    # 否则该 lib 函数在 curl 裸装时缺失。firewall/time 的部分函数分布在 cleanup/verify。
+    local lib
+    for lib in lib/common.sh lib/time.sh lib/optimize.sh lib/firewall.sh \
+               lib/singbox.sh lib/subscription.sh lib/argo.sh lib/warp.sh; do
         local func
-        func=$(grep -oE '^[a-z_]+\(\)' "$lib" 2>/dev/null | head -1 | tr -d '()')
-        if [ -n "$func" ] && ! grep -q "$func" deploy_optimize.sh 2>/dev/null; then
-            echo "WARN: $lib:$func 未同步到 deploy_optimize.sh (改 lib 后需同步单文件)"
-            ok=false
-        fi
+        for func in $(grep -oE '^[a-z_]+\(\)' "$lib" 2>/dev/null | tr -d '()' | sort -u); do
+            if ! grep -qE "$func\(|declare -F $func" deploy_optimize.sh deploy_singbox.sh verify.sh cleanup.sh bootstrap.sh 2>/dev/null; then
+                echo "WARN: $lib:$func 未同步到任何单文件 (改 lib 后需同步)"
+                ok=false
+            fi
+        done
     done
-    $ok || echo "提示: 改 lib 后请同步更新对应单文件，或跑 bash build.sh --sync" 
+    $ok || echo "提示: 改 lib 后请同步更新对应单文件，或跑 bash build.sh --sync"
 }
 check_sync || true
 
