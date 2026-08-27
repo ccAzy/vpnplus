@@ -9,6 +9,14 @@
 # ===================================================================
 set -euo pipefail
 
+# lib 加载（保持单文件可独立运行）
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+for _lib in common; do
+    if [ -f "$SCRIPT_DIR/lib/${_lib}.sh" ]; then source "$SCRIPT_DIR/lib/${_lib}.sh" 2>/dev/null || true
+    elif [ -f "lib/${_lib}.sh" ]; then source "lib/${_lib}.sh" 2>/dev/null || true
+    fi
+done
+
 DRY_RUN=false
 CHECK_ONLY=false
 for arg in "$@"; do
