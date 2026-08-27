@@ -55,7 +55,7 @@ PACKAGES=(
     ca-certificates curl jq git xz-utils tmux
     bash coreutils grep sed gawk
     iproute2 iptables iptables-persistent procps psmisc util-linux
-    cron ethtool kmod logrotate
+    cron ethtool kmod logrotate chrony
 )
 
 missing=()

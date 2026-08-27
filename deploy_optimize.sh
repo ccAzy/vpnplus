@@ -18,6 +18,15 @@
 # ===================================================================
 set -euo pipefail
 
+# ── lib 加载（保持单文件可独立运行：lib 存在则 source，否则用内联兜底） ──
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+for _lib in common time; do
+    if [ -f "$SCRIPT_DIR/lib/${_lib}.sh" ]; then source "$SCRIPT_DIR/lib/${_lib}.sh"
+    elif [ -f "lib/${_lib}.sh" ]; then source "lib/${_lib}.sh"
+    elif [ -f "/usr/local/lib/vpnplus/${_lib}.sh" ]; then source "/usr/local/lib/vpnplus/${_lib}.sh"
+    fi
+done
+
 # ── 参数解析 ──
 NO_REBOOT=false
 DRY_RUN=false

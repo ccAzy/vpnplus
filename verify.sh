@@ -10,6 +10,14 @@
 # ===================================================================
 set -euo pipefail
 
+# lib 加载（verify 侧仅需 time/tuic 检查，失败则用内联兜底）
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+for _lib in common time; do
+    if [ -f "$SCRIPT_DIR/lib/${_lib}.sh" ]; then source "$SCRIPT_DIR/lib/${_lib}.sh" 2>/dev/null || true
+    elif [ -f "lib/${_lib}.sh" ]; then source "lib/${_lib}.sh" 2>/dev/null || true
+    fi
+done
+
 SERVER_IP="${SERVER_IP:-${1:-}}"   # 兼容两种用法：SERVER_IP=x.x.x.x bash verify.sh 或 bash verify.sh x.x.x.x
 VMESS_LOCK="${VMESS_LOCK:-off}"
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; N='\033[0m'

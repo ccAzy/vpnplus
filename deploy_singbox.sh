@@ -14,6 +14,15 @@
 # ===================================================================
 set -euo pipefail
 
+# ── lib 加载（保持一键裸装兼容：lib 存在则 source，否则用内联兜底） ──
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+for _lib in common time firewall singbox subscription argo warp; do
+    if [ -f "$SCRIPT_DIR/lib/${_lib}.sh" ]; then source "$SCRIPT_DIR/lib/${_lib}.sh"
+    elif [ -f "lib/${_lib}.sh" ]; then source "lib/${_lib}.sh"
+    elif [ -f "/usr/local/lib/vpnplus/${_lib}.sh" ]; then source "/usr/local/lib/vpnplus/${_lib}.sh"
+    fi
+done
+
 # ── 可调常量（集中管理，避免端口段/限速值散落各处） ──
 readonly HOP_HY_RANGE="40000:42000"     # Hysteria2 端口跳跃段
 readonly HOP_TU_RANGE="43000:45000"     # Tuic5 端口跳跃段
