@@ -185,8 +185,11 @@ journalctl -u vpnplus-net-tuning.service --no-pager
 需要重新执行一遍 sing-box 部署（如更换配置、恢复现场状态）时：
 
 ```bash
-rm -f /etc/.vpnplus-singbox && bash deploy_singbox.sh
+bash deploy_singbox.sh --force
+# 等价 rm -f /etc/.vpnplus-singbox && bash deploy_singbox.sh
+# 裸装：bash <(curl -fsSL https://raw.githubusercontent.com/ccAzy/vpnplus/main/deploy_singbox.sh) --force
 ```
+旧写法 `rm -f /etc/.vpnplus-singbox && bash deploy_singbox.sh` 仍可用，`--force` 是同一逻辑的显式开关，会强制对齐 `sb.json/iptables/订阅` 三处（专治 `vi sb.json` 后被 `@reboot 9-1` 刷回来的岔裂）。
 
 脚本已处理重跑稳定性的几个坑：
 
