@@ -436,6 +436,27 @@ EOSUB
 }
 fi
 
+if ! declare -F ensure_singbox_legacy_env >/dev/null 2>&1; then
+ensure_singbox_legacy_env() {
+    local dropin="/etc/systemd/system/sing-box.service.d/99-vpnplus.conf"
+    if [ ! -f "$dropin" ] || ! grep -q "ENABLE_DEPRECATED_LEGACY_DOMAIN_STRATEGY_OPTIONS" "$dropin" 2>/dev/null; then
+        if ${DRY_RUN:-false}; then info "[dry-run] 将写入 $dropin: Environment=ENABLE_DEPRECATED_LEGACY_DOMAIN_STRATEGY_OPTIONS=true"; return 0; fi
+        mkdir -p "$(dirname "$dropin")" 2>/dev/null || true
+        if [ -f "$dropin" ]; then grep -q "LimitNOFILE" "$dropin" 2>/dev/null || echo "LimitNOFILE=1048576" >> "$dropin"; else cat > "$dropin" <<'EOF'
+[Service]
+LimitNOFILE=1048576
+EOF
+        fi
+        if ! grep -q "ENABLE_DEPRECATED_LEGACY_DOMAIN_STRATEGY_OPTIONS" "$dropin" 2>/dev/null; then echo "Environment=ENABLE_DEPRECATED_LEGACY_DOMAIN_STRATEGY_OPTIONS=true" >> "$dropin"; ok "已注入 sing-box 兼容环境变量 ($dropin)"; fi
+        for svc in sb xr; do if [ -f "/etc/systemd/system/${svc}.service" ]; then local d="/etc/systemd/system/${svc}.service.d/99-vpnplus.conf"; mkdir -p "$(dirname "$d")" 2>/dev/null || true; grep -q "ENABLE_DEPRECATED" "$d" 2>/dev/null || echo -e "[Service]\nEnvironment=ENABLE_DEPRECATED_LEGACY_DOMAIN_STRATEGY_OPTIONS=true" > "$d"; fi; done
+        systemctl daemon-reload 2>/dev/null || true
+        if systemctl is-active sing-box >/dev/null 2>&1; then systemctl try-restart sing-box 2>/dev/null || systemctl restart sing-box 2>/dev/null || true; sleep 2; fi
+    fi
+    if systemctl is-failed sing-box >/dev/null 2>&1; then warn "检测到 sing-box 失败状态，尝试重启"; systemctl restart sing-box 2>/dev/null || true; sleep 2; fi
+    if systemctl is-active sing-box >/dev/null 2>&1; then ok "sing-box 运行正常（legacy env 已生效）"; else warn "sing-box 仍未运行，请检查 journalctl -u sing-box"; fi
+}
+fi
+
 if ! declare -F force_ipv4_lock >/dev/null 2>&1; then
 force_ipv4_lock() {
     info "锁定 IPv4（直连/WARP/DNS 强制 ipv4_only，压延迟）..."
