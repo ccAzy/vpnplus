@@ -243,9 +243,9 @@ Argo 临时隧道（trycloudflare.com 域名）掉线或僵死时，服务器上
 
 ---
 
-## 旧服务器清理
+## 旧服务器清理（彻底卸载）
 
-清理前建议先预览：
+想换自己部署的节点面板、不再用本脚本时，先预览再执行：
 
 ```bash
 bash cleanup.sh --force --dry-run
@@ -270,6 +270,17 @@ bash cleanup.sh
 ```
 
 它只清理 vpnplus 自己的配置、服务、订阅进程、网络调优服务和 `ACVPN_*` 独立防火墙链，不会按关键词全局删除 Docker、fail2ban 或其他程序的规则。
+
+卸载后即回到干净状态，可直接部署你自己的面板（3x-ui、marzban 等）。卸载清单：
+
+- 服务：sing-box / sb / xr / cloudflared / 网络调优 / iptables 恢复 unit（含 drop-in 注入的环境变量，不会污染你自建的同名服务）
+- 文件：`/etc/s-box`（含 sing-box 二进制、证书私钥、sb.json）、`/usr/bin/sb`、`/root/websbox`、保活/调优脚本、`/var/log/vpnplus-*.log` 全部审计日志（不留 IP/token 痕迹）
+- 防火墙：`ACVPN_*` 独立链 + 端口跳跃 DNAT + sysctl 加固文件；不碰 fail2ban/Docker 等第三方规则
+- 定时任务：仅删 vpnplus/sb 自己的 crontab 条目
+
+有意保留（对新面板有益，无需卸）：BBRv3 内核与网络优化、`gai.conf` IPv4 优先、`/var/backups/vpnplus` 防火墙备份（确认新面板正常后可手动删）。
+
+清理脚本会先把防火墙规则备份到：
 
 ---
 

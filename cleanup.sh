@@ -116,13 +116,15 @@ clean_chains() {
     # 3) 兜底：若旧版遗留了分散的 nat 端口跳跃规则（40000:42000/43000:45000）也精确按目标端口清理，
     #    但仅匹配 vpnplus/ACVPN 特有的端口范围 DNAT/REDIRECT，依旧不动其他规则。
     #    （2026-08-24 HK 实测：sing-box 旧配置还会留下 REDIRECT 40000:41000 型重复规则，同样会截胡跳跃段流量）
+    #    注意：grep 无匹配 rc=1，在 set -e + pipefail 下会直接杀掉脚本（2026-08-27 HK 实测 dry-run 中断于此），
+    #    整段用 || true 兜底：无匹配=无需清理，属正常路径而非错误
     command -v iptables >/dev/null 2>&1 && {
         iptables -t nat -L PREROUTING --line-numbers -n 2>/dev/null |
           grep -E '(DNAT|REDIRECT).*dpts:(40000:42000|43000:45000|40000:41000|43000:44000) ' |
           awk '{print $1}' | sort -rn | while read -r num; do
             run iptables -t nat -D PREROUTING "$num"
         done
-    }
+    } || true
     ok "独立防火墙链已清理（未触碰第三方规则）"
 }
 fi
@@ -198,23 +200,28 @@ rm_units() {
     echo "--- 清理 systemd units ---"
     local COUNT=0 unit
     for unit in /etc/systemd/system/sing-box.service \
+                /etc/systemd/system/sing-box.service.d \
+                /etc/systemd/system/sb.service \
+                /etc/systemd/system/sb.service.d \
+                /etc/systemd/system/xr.service \
+                /etc/systemd/system/xr.service.d \
                 /etc/systemd/system/cloudflared.service \
                 /etc/systemd/system/cloudflared-update.service \
                 /etc/systemd/system/cloudflared-update.timer \
                 /etc/systemd/system/acvpn-rss.service \
                 /etc/systemd/system/vpnplus-net-tuning.service \
                 /etc/systemd/system/vpnplus-netfilter-restore.service; do
-        if [ -f "$unit" ]; then
+        if [ -e "$unit" ]; then
             # 只删除明确属于 vpnplus/旧 ACVPN 的 unit；不因同名而删除其他 cloudflared 服务。
-            if [ "$(basename "$unit")" = "acvpn-rss.service" ] || grep -qE '/etc/s-box|/root/websbox|vpnplus|ACVPN' "$unit" 2>/dev/null; then
-                run rm -f "$unit"; COUNT=$((COUNT + 1))
+            if [ "$(basename "$unit")" = "acvpn-rss.service" ] || [ "$(basename "$unit")" = "sb.service" ] || [ "$(basename "$unit")" = "xr.service" ] || [ -d "$unit" ] || grep -qE '/etc/s-box|/root/websbox|vpnplus|ACVPN|ENABLE_DEPRECATED' "$unit" 2>/dev/null; then
+                run rm -rf "$unit"; COUNT=$((COUNT + 1))
             else
                 warn "保留未确认归属的 unit: $unit"
             fi
         fi
     done
     run systemctl daemon-reload || true
-    [ $COUNT -gt 0 ] && ok "已删除 ${COUNT} 个 vpnplus systemd unit 文件" || info "无 vpnplus unit 文件需清理"
+    [ $COUNT -gt 0 ] && ok "已删除 ${COUNT} 个 vpnplus/sb systemd unit 文件" || info "无 vpnplus unit 文件需清理"
 }
 
 rm_files() {
@@ -226,15 +233,20 @@ rm_files() {
                 /usr/local/sbin/vpnplus-net-tuning.sh \
                 /var/lock/vpnplus-argo-keepalive.lock \
                 /etc/iptables/rules.v4 /etc/iptables/rules.v6 \
-                /etc/logrotate.d/vpnplus; do
+                /etc/logrotate.d/vpnplus \
+                /var/log/vpnplus-optimize.log \
+                /var/log/vpnplus-optimize-manifest.log \
+                /var/log/vpnplus-singbox-manifest.log \
+                /var/log/vpnplus-sbfeed.log; do
         if [ -e "$path" ]; then
             run rm -rf "$path"; COUNT=$((COUNT + 1)); ok "已删除: $path"
         fi
     done
     for mark in /etc/.ACVPN-optimized /etc/.ACVPN-singbox /etc/.vpnplus-optimized /etc/.vpnplus-singbox; do
-        [ -f "$mark" ] && { run rm -f "$mark"; ok "已删除标记: $mark"; }
+        # 注意：[ -f ] && {...} 独立成句时，文件不存在=整句 rc=1，set -e 会杀脚本（2026-08-27 HK 实测），必须 || true
+        if [ -f "$mark" ]; then run rm -f "$mark"; ok "已删除标记: $mark"; fi
     done
-    [ $COUNT -eq 0 ] && info "无 sb 文件需清理"
+    if [ $COUNT -eq 0 ]; then info "无 sb 文件需清理"; fi
 }
 
 # ———————— 6-7：sysctl / nftables 遗留清理 ————————
@@ -243,7 +255,8 @@ clean_sysctl() {
     # 我们只移除脚本文档明确自己写入的 sysctl.d 文件（若仍存在）
     for f in /etc/sysctl.d/99-ACVPN-security.conf /etc/sysctl.d/99-ACVPN-brutal.conf \
              /etc/sysctl.d/99-vpnplus-security.conf /etc/sysctl.d/99-vpnplus-brutal.conf; do
-        [ -f "$f" ] && { run rm -f "$f"; ok "已删除 sysctl 文件: $f"; }
+        # 同上：if 形式防 set -e 在文件不存在时杀脚本
+        if [ -f "$f" ]; then run rm -f "$f"; ok "已删除 sysctl 文件: $f"; fi
     done
     /etc/init.d/procps restart >/dev/null 2>&1 || sysctl --system >/dev/null 2>&1 || true
 }
@@ -274,7 +287,10 @@ verify_clean() {
     echo "========================================="
     local PASS=0 FAIL=0
     if ! systemctl is-active sing-box &>/dev/null && [ ! -f /etc/systemd/system/sing-box.service ]; then ok "sing-box 服务已清除"; PASS=$((PASS+1)); else warn "sing-box 服务仍存在"; FAIL=$((FAIL+1)); fi
+    if [ ! -d /etc/systemd/system/sing-box.service.d ] && [ ! -f /etc/systemd/system/sing-box.service.d/99-vpnplus.conf ]; then ok "sing-box drop-in 已清除（无 legacy env 残留）"; PASS=$((PASS+1)); else warn "sing-box.service.d drop-in 残留"; FAIL=$((FAIL+1)); fi
     [ ! -d /etc/s-box ] && { ok "/etc/s-box 已删除"; PASS=$((PASS+1)); } || { warn "/etc/s-box 仍存在"; FAIL=$((FAIL+1)); }
+    if ! ls /var/log/vpnplus-*.log >/dev/null 2>&1; then ok "vpnplus 日志已清除（无 IP/token 残留）"; PASS=$((PASS+1)); else warn "vpnplus 日志仍存在"; FAIL=$((FAIL+1)); fi
+    if [ ! -f /etc/systemd/system/sb.service ] && [ ! -f /etc/systemd/system/xr.service ]; then ok "sb/xr 兼容服务已清除"; PASS=$((PASS+1)); else warn "sb.service/xr.service 残留"; FAIL=$((FAIL+1)); fi
     [ ! -f /etc/systemd/system/vpnplus-netfilter-restore.service ] && { ok "vpnplus-netfilter-restore.service 已删除"; PASS=$((PASS+1)); } || { warn "vpnplus-netfilter-restore.service 仍存在"; FAIL=$((FAIL+1)); }
     [ ! -f /usr/local/sbin/vpnplus-argo-keepalive.sh ] && { ok "Argo 保活脚本已删除"; PASS=$((PASS+1)); } || { warn "vpnplus-argo-keepalive.sh 仍存在"; FAIL=$((FAIL+1)); }
     if iptables -L "$CHAIN_ANTIPROBE" -n >/dev/null 2>&1 || iptables -t nat -L "$CHAIN_PORTHOP" -n >/dev/null 2>&1; then
