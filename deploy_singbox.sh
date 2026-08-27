@@ -50,14 +50,19 @@ sb_feed() {  # sb_feed <超时秒数> - <<'KEYS'  ... KB: 用 stdin 传入按键
 
 DRY_RUN=false
 VMESS_LOCK="${VMESS_LOCK:-off}"     # 用户明确不需要防火墙：vmess 明文端口公网直连（不再锁回环）
+RESET_SUB="${RESET_SUB:-0}"         # RESET_SUB=1 强制轮转订阅 token/端口（暴露后一键换链）
 for arg in "$@"; do
     case "$arg" in
         --dry-run) DRY_RUN=true ;;
+        --reset-sub) RESET_SUB=1 ;;
         --help|-h) cat <<'HELP'
 vpnplus deploy_singbox.sh — sing-box 一键部署
-用法: bash deploy_singbox.sh [--dry-run]
+用法: bash deploy_singbox.sh [--dry-run] [--reset-sub]
   --dry-run  只打印将执行的动作，不实际修改系统
+  --reset-sub 强制轮转订阅（删除旧 subport/subtoken，生成全新 token/端口）
+             等价 RESET_SUB=1 bash deploy_singbox.sh，暴露后一键换链
   VMESS_LOCK=on|off  明文 VMess 端口是否封锁公网（默认 off：直连，仅密钥登录无防火墙场景）
+  RESET_SUB=1        同 --reset-sub
 HELP
         exit 0 ;;
     esac
@@ -213,6 +218,19 @@ CHRONY
 setup_subscription() {
     info "配置本地订阅链接..."
     sleep 1
+    # RESET_SUB=1 / --reset-sub：暴露后一键轮转（删旧 token/端口，强制全新）
+    if [ "${RESET_SUB:-0}" = "1" ] || [ "${RESET_SUB:-}" = "true" ]; then
+        if $DRY_RUN; then
+            info "[dry-run] RESET_SUB=1 将删除旧订阅并生成全新 token/端口"
+        else
+            info "RESET_SUB=1 检测到，清理旧订阅（旧链接将失效）..."
+            rm -f /etc/s-box/subport.log /etc/s-box/subtoken.log 2>/dev/null || true
+            rm -rf /root/websbox/* 2>/dev/null || true
+            # 同步清理旧 sb 生成的聚合文件，避免残留
+            rm -f /etc/s-box/jhsub.txt /etc/s-box/jhdy.txt 2>/dev/null || true
+            ok "旧订阅已清理，下一步将生成全新 token/端口"
+        fi
+    fi
     # 端口稳定性：重跑时复用已有订阅端口，避免每次随机导致客户端订阅地址作废
     local KEEP_PORT=""
     if [ -f /etc/s-box/subport.log ]; then
