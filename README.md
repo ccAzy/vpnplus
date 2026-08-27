@@ -206,6 +206,24 @@ RESET_SUB=1 bash deploy_singbox.sh
 ```
 旧链接立即 `404`，新订阅 `clmi.yaml/tuic5.txt` 已切到新 `token/端口`，TUIC 当前为 `54321`（`40254` 已知易被限速，`verify.sh` 会黄灯提醒）
 
+## 项目结构（lib 化，低成本变更）
+
+源码以 `lib/` 为准，单文件保持 `curl | bash` 兼容：
+
+```
+lib/common.sh      # 日志/颜色/BASE_PACKAGES+chrony
+lib/time.sh        # ensure_time_sync / check_time_sync
+lib/optimize.sh    # BBRv3 + sysctl/ethtool/qdisc（按内存分级）
+lib/firewall.sh    # ACVPN_* 链 + 跳跃 DNAT + 清理
+lib/singbox.sh     # sb_feed / sb 安装
+lib/subscription.sh# KEEP_PORT + RESET_SUB
+lib/argo.sh        # Argo + keepalive v3
+lib/warp.sh        # WARP + 分流
+lib/verify/        # verify 侧 time/tuic 回环 204
+build.sh           # 校验 lib→单文件漂移，生成 dist/ 供 raw 分发
+```
+改 1 个端口/1 个协议只动 1 个 `lib/*.sh`，`bash build.sh` 校验漂移，`bash -n + shellcheck` 门禁。
+
 ---
 
 ## Argo 临时隧道自动恢复
