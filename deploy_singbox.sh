@@ -1045,7 +1045,10 @@ main() {
 
     # 跳过条件：sb.json 存在 + 服务运行中即跳过（checkpoint 仅为"部署完全成功"辅标记；
     # 若强依赖 checkpoint，上次中断/被打断后丢失，已部署机器会被误判全流程重跑）
-    if [ "$FORCE" != "true" ] && [ -f /etc/s-box/sb.json ] && { systemctl is-active sb >/dev/null 2>&1 || systemctl is-active sing-box >/dev/null 2>&1 || systemctl is-active xr >/dev/null 2>&1; }; then
+    # 例外：RESET_SUB=1（显式轮转订阅）与 VMESS_LOCK=on（显式改防火墙策略）不跳过，
+    # 否则 README 教的 "RESET_SUB=1 bash deploy_singbox.sh" 在已部署机器上永远执行不到
+    if [ "$FORCE" != "true" ] && [ "${RESET_SUB:-0}" != "1" ] && [ "${VMESS_LOCK:-off}" != "on" ] \
+      && [ -f /etc/s-box/sb.json ] && { systemctl is-active sb >/dev/null 2>&1 || systemctl is-active sing-box >/dev/null 2>&1 || systemctl is-active xr >/dev/null 2>&1; }; then
         # 已部署跳过≠失败，撤销 EXIT trap 避免误报“部署中断（退出码 0）”
         trap - EXIT
         ok "sing-box 已部署运行中，跳过安装。"
