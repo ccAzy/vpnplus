@@ -82,6 +82,21 @@ fi
 # 日志轮转配置
 if [ -f /etc/logrotate.d/vpnplus ]; then ok "日志轮转配置存在"; PASS=$((PASS + 1)); else warn "未检测到 logrotate 配置"; fi
 
+# 1b. 时间同步（P0：Reality/VMess 握手对时，漂移>90s 全不通，但端口照常通）
+echo "--- 时间同步 ---"
+if command -v chronyc >/dev/null 2>&1; then
+    if chronyc tracking 2>/dev/null | grep -q 'Leap status.*Normal'; then ok "chrony 已同步（Leap Normal）"; PASS=$((PASS + 1)); else warn "chrony 未 Normal（$(chronyc tracking 2>/dev/null | grep 'Leap status' | head -1)）"; fi
+    if chronyc sources -v 2>/dev/null | grep -q '\^'; then ok "chrony 源可达"; PASS=$((PASS + 1)); else warn "chrony 源不可达或未配置国内源"; fi
+else
+    warn "chrony 未安装（时间漂移会导致 bad timestamp 全不通，建议 apt install chrony）"
+fi
+if timedatectl 2>/dev/null | grep -q 'System clock synchronized: yes'; then ok "System clock synchronized: yes"; PASS=$((PASS + 1)); else warn "System clock synchronized: no（timedatectl）"; fi
+# 漂移快速检测（与阿里云 NTP 对比，>5s 告警）
+if command -v ntpdate >/dev/null 2>&1 || command -v chronyc >/dev/null 2>&1; then
+    _off=$(timeout 5 ntpdate -q ntp.aliyun.com 2>&1 | grep -oE 'offset .* sec' | head -1 || true)
+    if [ -n "$_off" ]; then info "NTP 偏移: $_off"; fi
+fi
+
 # 2. 进程
 echo "--- 进程检查 ---"
 if pgrep -f sing-box >/dev/null; then
@@ -104,6 +119,26 @@ if iptables -t nat -L "$CHAIN_PORTHOP" -n >/dev/null 2>&1; then ok "端口跳跃
 HOP_LEAK=$(iptables -t nat -L PREROUTING -n --line-numbers 2>/dev/null | grep -E "DNAT|REDIRECT" | grep -E "40000:42000|43000:45000" | grep -v "ACVPN_PORTHOP" | head -1 || true)
 if [ -n "$HOP_LEAK" ]; then warn "检测到 PREROUTING 残留过期端口跳跃规则: $HOP_LEAK（重跑 deploy_singbox.sh 会自动清理）"; else ok "PREROUTING 无残留端口跳跃段"; PASS=$((PASS + 1)); fi
 if iptables -L "$CHAIN_ANTIPROBE" -n >/dev/null 2>&1; then ok "防探测链 ${CHAIN_ANTIPROBE:-ACVPN_ANTIPROBE} 存在"; PASS=$((PASS + 1)); else warn "防探测链不存在"; fi
+
+# 3b. TUIC 端口可用性（P0：40254 为已知易被墙端口，直连不通但跳跃 44000 通的典型）
+TU_PORT=$(jq -r '.inbounds[] | select(.type=="tuic") | .listen_port' /etc/s-box/sb.json 2>/dev/null || true)
+if [ -n "$TU_PORT" ] && [ "$TU_PORT" != "null" ]; then
+    if [ "$TU_PORT" = "40254" ]; then warn "TUIC 仍为 40254（已知易被运营商限速，建议切 54321 并重建跳跃 DNAT）"; else ok "TUIC 端口 $TU_PORT 非已知污染端口"; PASS=$((PASS + 1)); fi
+    # 跳跃 DNAT 是否指向当前 TUIC 端口
+    if iptables -t nat -L "$CHAIN_PORTHOP" -n 2>/dev/null | grep -q "to::${TU_PORT}"; then ok "端口跳跃 DNAT 指向 TUIC $TU_PORT"; PASS=$((PASS + 1)); else warn "端口跳跃 DNAT 未指向 TUIC $TU_PORT（43000:45000 应 DNAT 到 :$TU_PORT）"; fi
+fi
+# 轻量本地回环自检（区分“本机坏”与“外网墙”）：127.0.0.1 TUIC 回环若通，外网不通则为墙
+if [ -n "$TU_PORT" ] && [ "$TU_PORT" != "null" ] && command -v /etc/s-box/sing-box >/dev/null 2>&1; then
+    _tuic_uuid=$(jq -r '.inbounds[] | select(.type=="tuic") | .users[0].uuid' /etc/s-box/sb.json 2>/dev/null || true)
+    if [ -n "$_tuic_uuid" ] && [ "$_tuic_uuid" != "null" ]; then
+        cat > /tmp/vpnplus-verify-tuic.json <<JSON_TMP
+{"log":{"level":"error"},"inbounds":[{"type":"socks","listen":"127.0.0.1","listen_port":18081}],"outbounds":[{"type":"tuic","server":"127.0.0.1","server_port":$TU_PORT,"uuid":"$_tuic_uuid","password":"$_tuic_uuid","congestion_control":"bbr","tls":{"enabled":true,"server_name":"www.bing.com","insecure":true,"alpn":["h3"]}}]}
+JSON_TMP
+        timeout 4 /etc/s-box/sing-box run -c /tmp/vpnplus-verify-tuic.json > /tmp/vpnplus-verify-tuic.log 2>&1 & _vpid=$!; sleep 2
+        if curl -s -o /dev/null -w '%{http_code}' --socks5-hostname 127.0.0.1:18081 --connect-timeout 4 --max-time 6 https://www.google.com/generate_204 2>/dev/null | grep -q '204'; then ok "TUIC 本地回环自检通（127.0.0.1:$TU_PORT → google 204）"; PASS=$((PASS + 1)); else warn "TUIC 本地回环不通（本机 sing-box 或证书异常，非外网墙）"; fi
+        kill -9 $_vpid 2>/dev/null || true; rm -f /tmp/vpnplus-verify-tuic.json /tmp/vpnplus-verify-tuic.log 2>/dev/null || true
+    fi
+fi
 
 if [ "$VMESS_LOCK" = "on" ]; then
     if iptables-save 2>/dev/null | grep -q '! -i lo'; then

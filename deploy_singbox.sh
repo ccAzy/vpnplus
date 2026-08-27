@@ -166,7 +166,7 @@ check_env() {
     if ! command -v apt-get &>/dev/null; then fail "非 Debian/Ubuntu 系统，脚本仅支持 apt 系发行版"; return 1; fi
 
     # deploy_singbox 也可独立运行：补齐第一阶段可能未执行的工具。
-    local packages=(ca-certificates curl jq git xz-utils tmux iproute2 iptables iptables-persistent procps psmisc util-linux cron ethtool kmod logrotate)
+    local packages=(ca-certificates curl jq git xz-utils tmux iproute2 iptables iptables-persistent procps psmisc util-linux cron ethtool kmod logrotate chrony)
     local missing=() pkg
     for pkg in "${packages[@]}"; do
         dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q 'install ok installed' || missing+=("$pkg")
@@ -191,6 +191,23 @@ check_env() {
     info "内存: ${mem_mb}MB"
     if [ "$mem_mb" -gt 0 ] && [ "$mem_mb" -lt 512 ]; then warn "低内存 VPS（<512MB）"; fi
     return 0
+}
+
+ensure_time_sync() {
+    info "校准系统时间（chrony 国内源）..."
+    if $DRY_RUN; then info "[dry-run] 将配置 chrony 并同步时间"; return 0; fi
+    cat > /etc/chrony/chrony.conf <<'CHRONY'
+pool ntp.aliyun.com iburst
+pool ntp1.aliyun.com iburst
+pool cn.pool.ntp.org iburst
+pool pool.ntp.org iburst
+makestep 1 3
+rtcsync
+CHRONY
+    systemctl enable --now chrony 2>/dev/null || systemctl restart chrony 2>/dev/null || true
+    timeout 15 chronyc makestep 2>/dev/null || timeout 15 ntpdate -u ntp.aliyun.com 2>/dev/null || true
+    sleep 2
+    if chronyc tracking 2>/dev/null | grep -q 'Leap status.*Normal'; then ok "时间已同步（chrony Normal）"; else warn "chrony 尚未 Normal，稍后自动追上"; fi
 }
 # ── 订阅配置 ──
 setup_subscription() {
@@ -953,6 +970,9 @@ main() {
         return 0
     }
     if [ -f /etc/.vpnplus-singbox ]; then :; else assert_sb_menu; fi
+
+    # 时间校准必须在安装前完成（否则 Reality/VMess 握手 bad timestamp）
+    ensure_time_sync
 
     if $DRY_RUN; then
         echo -e "${YELLOW}═══ DRY-RUN 模式：仅预览，不修改系统 ═══${N}"

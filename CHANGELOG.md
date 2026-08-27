@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-08-27 — 时钟与 TUIC 单点故障修复（rn1 实测）
+
+* **P0 时钟漂移（`bad timestamp` 全不通）**：`deploy_optimize.sh`/`deploy_singbox.sh` 的 `install_dependencies` 新增 `chrony`，新增 `ensure_time_sync()`（国内源 `ntp.aliyun/ntp1.aliyun/cn.pool/pool.ntp` + `makestep 1 3` + `rtcsync`，`systemctl enable --now chrony` 并 `chronyc makestep` 即时拨正），`verify.sh` 新增 `chrony Leap Normal` / `System clock synchronized` / `ntpdate -q` 偏移检查。rn1 实测 `System clock synchronized: no` / `chronyc: command not found`，修复后 `Stratum 2 Normal`。
+* **P0 TUIC 单点端口污染**：rn1 `40254` 直连在外网被精准限速（本机回环 204 通、外网 Hy2 通、TUIC 40254 超时8s、TUIC 44000跳跃/54321 新端口秒通 204），`verify.sh` 新增 `TUIC 端口污染` 与 `端口跳跃 DNAT 指向` 检查 + 本地回环 `127.0.0.1:$TU_PORT → google 204` 自检，区分“本机坏”与“外网墙”。rn1 已切 `40254→54321` 并 `iptables -t nat DNAT 43000:45000→54321` + `ACVPN_ANTIPROBE 54321`，`clmi.yaml/tuic5.txt/jhsub` 同步 54321，重跑 `netfilter-persistent save`。
+* **影响面**：其余 6 台（hk/jp/cc/vn/rn2/qq）已验证同依赖缺口，建议批量重跑 `deploy_optimize.sh` 补 chrony。
+
 ## 2026-08-25 — 全面审计修复（11 项，含 1 真实 Bug）
 
 针对公开仓库做全面审计（5 脚本 + 文档），修正全部发现项：

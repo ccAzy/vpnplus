@@ -141,7 +141,7 @@ fi
 # 不再“apt 失败后继续运行再静默报错”。
 install_dependencies() {
     # netfilter-persistent 提供服务 iptables-persistent；logrotate 提供日志轮转；flock 属 util-linux
-    local packages=(ca-certificates curl jq git xz-utils tmux iproute2 iptables iptables-persistent procps psmisc util-linux cron ethtool kmod logrotate)
+    local packages=(ca-certificates curl jq git xz-utils tmux iproute2 iptables iptables-persistent procps psmisc util-linux cron ethtool kmod logrotate chrony)
     local missing=() pkg
     for pkg in "${packages[@]}"; do
         dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q 'install ok installed' || missing+=("$pkg")
@@ -154,6 +154,38 @@ install_dependencies() {
     ok "基础依赖安装完成"
 }
 
+ensure_time_sync() {
+    info "校准系统时间（chrony 国内源）..."
+    if $DRY_RUN; then info "[dry-run] 将配置 chrony 并同步时间"; return 0; fi
+    if ! dpkg-query -W -f='${Status}' chrony 2>/dev/null | grep -q 'install ok installed'; then
+        warn "chrony 未安装，已在依赖阶段补齐"
+    fi
+    cat > /etc/chrony/chrony.conf <<'CHRONY'
+pool ntp.aliyun.com iburst
+pool ntp1.aliyun.com iburst
+pool cn.pool.ntp.org iburst
+pool pool.ntp.org iburst
+makestep 1 3
+rtcsync
+CHRONY
+    systemctl enable --now chrony 2>/dev/null || systemctl restart chrony 2>/dev/null || true
+    # 立即拨正（chrony 3秒内 makestep）
+    timeout 15 chronyc makestep 2>/dev/null || timeout 15 ntpdate -u ntp.aliyun.com 2>/dev/null || true
+    sleep 2
+    if chronyc tracking 2>/dev/null | grep -q 'Leap status.*Normal'; then
+        ok "时间已同步（chrony Normal）"
+    else
+        chronyc tracking 2>&1 | head -5 || true
+        warn "chrony 尚未 Normal，稍后将自动追上（已设 makestep 1 3）"
+    fi
+    if timedatectl 2>/dev/null | grep -q 'System clock synchronized: yes'; then
+        ok "System clock synchronized: yes"
+    else
+        info "timedatectl: $(timedatectl 2>/dev/null | grep -E 'synchronized|NTP' | tr '\n' ';')"
+    fi
+    manifest "time sync ensured via chrony"
+}
+
 # 先预检再访问 apt，避免非 Debian 系统在检查前就执行 apt-get。
 check_env
 if $DRY_RUN; then
@@ -162,6 +194,7 @@ if $DRY_RUN; then
     exit 0
 fi
 install_dependencies || exit 1
+ensure_time_sync
 # ── IPv4 优先（防 raw.githubusercontent 等 v6 黑洞导致 curl 卡 75s） ──
 if grep -q 'precedence ::ffff:0:0/96 100' /etc/gai.conf 2>/dev/null; then
     ok "gai.conf 已设 IPv4 优先"
