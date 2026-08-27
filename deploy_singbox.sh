@@ -461,25 +461,29 @@ fi
 
 if ! declare -F force_ipv4_lock >/dev/null 2>&1; then
 force_ipv4_lock() {
-    info "锁定 IPv4（直连/WARP/DNS 强制 ipv4_only，压延迟）..."
-    if [ ! -f /etc/s-box/sb.json ]; then warn "sb.json 不存在，跳过 IPv4 锁定"; return 0; fi
-    if $DRY_RUN; then info "[dry-run] 将把 sb.json 的 prefer_ipv4/strategy → ipv4_only 并重载"; return 0; fi
+    info "切换入口IP为 IPv4（SB 15-1）..."
+    if [ ! -f /etc/s-box/sb.json ]; then warn "sb.json 不存在，跳过"; return 0; fi
+    if $DRY_RUN; then info "[dry-run] 将执行 SB 15-1 切换入口为 IPv4"; return 0; fi
     if declare -F ensure_singbox_legacy_env >/dev/null 2>&1; then ensure_singbox_legacy_env || true; fi
-    cp /etc/s-box/sb.json /etc/s-box/sb.json.bak.ipv4 2>/dev/null || true
-    local changed=false
-    if jq '
-        (.route.rules[]? | select(.strategy != null) | .strategy) = "ipv4_only"
-        | (.dns.strategy? | select(. != null)) = "ipv4_only"
-        | (.dns.servers[]? | select(.strategy != null) | .strategy) = "ipv4_only"
-        | (.outbounds[]? | select(.type=="direct" or .type=="socks") | .domain_strategy) = "ipv4_only"
-    ' /etc/s-box/sb.json > /tmp/sb.json.tmp 2>/dev/null && [ -s /tmp/sb.json.tmp ]; then
-        if ! cmp -s /etc/s-box/sb.json /tmp/sb.json.tmp 2>/dev/null; then
-            cat /tmp/sb.json.tmp > /etc/s-box/sb.json; changed=true; ok "route/outbounds/dns 策略已切 ipv4_only"
-        fi
-        rm -f /tmp/sb.json.tmp
-    else warn "IPv4 锁定 jq 失败，保持原 sb.json"; rm -f /tmp/sb.json.tmp 2>/dev/null || true; return 1; fi
-    if ! jq empty /etc/s-box/sb.json 2>/dev/null; then warn "sb.json JSON 校验失败，回滚备份"; cp /etc/s-box/sb.json.bak.ipv4 /etc/s-box/sb.json 2>/dev/null || true; return 1; fi
-    if $changed; then systemctl try-restart sing-box 2>/dev/null || systemctl restart sing-box 2>/dev/null || true; sleep 2; if systemctl is-active sing-box >/dev/null 2>&1; then ok "IPv4 锁定完成，已重载 sing-box"; else warn "IPv4 锁定后 sing-box 未运行，请检查 journalctl -u sing-box"; fi; else info "已是 ipv4_only，无需变更"; fi
+    if command -v sb >/dev/null 2>&1; then
+        printf "15\n1\n" | sb_feed 30 2>&1 | tail -n 5 || true
+        sleep 2
+        local cur_ip; cur_ip=$(cat /etc/s-box/server_ip.log 2>/dev/null || true)
+        if echo "$cur_ip" | grep -q "^[0-9]"; then ok "入口IP已切 IPv4 ($cur_ip)"; else warn "入口IP仍非 IPv4 ($cur_ip)，请手动 sb→15→1"; fi
+    else warn "sb 不存在，跳过入口切换"; fi
+    local bad; bad=$(jq -r '.route.rules[]? | select(.strategy != null and .strategy != "ipv4_only") | .strategy' /etc/s-box/sb.json 2>/dev/null | head -1 || true)
+    bad+=$(jq -r '.outbounds[]? | select((.type=="direct" or .type=="socks") and .domain_strategy != "ipv4_only") | .domain_strategy // "null"' /etc/s-box/sb.json 2>&1 | head -1 || true)
+    if [ -n "$bad" ]; then
+        if ${FORCE:-false}; then
+            info "出口非 ipv4_only ($bad)，--force 下尝试修复..."
+            cp /etc/s-box/sb.json /etc/s-box/sb.json.bak.ipv4 2>/dev/null || true
+            if jq '(.route.rules[]? | select(.strategy != null) | .strategy) = "ipv4_only" | (.dns.strategy? | select(. != null)) = "ipv4_only" | (.dns.servers[]? | select(.strategy != null) | .strategy) = "ipv4_only" | (.outbounds[]? | select(.type=="direct" or .type=="socks") | .domain_strategy) = "ipv4_only"' /etc/s-box/sb.json > /tmp/sb.json.tmp 2>/dev/null && [ -s /tmp/sb.json.tmp ] && ! cmp -s /etc/s-box/sb.json /tmp/sb.json.tmp 2>/dev/null; then
+                cat /tmp/sb.json.tmp > /etc/s-box/sb.json && rm -f /tmp/sb.json.tmp
+                jq empty /etc/s-box/sb.json 2>/dev/null && systemctl try-restart sing-box 2>/dev/null || systemctl restart sing-box 2>/dev/null || true; sleep 2
+                ok "出口已切 ipv4_only"
+            else rm -f /tmp/sb.json.tmp 2>/dev/null || true; warn "出口修复失败，保持原状"; fi
+        else warn "出口仍非 ipv4_only ($bad)，建议 bash deploy_singbox.sh --force 重跑"; fi
+    else ok "出口已是 ipv4_only"; fi
 }
 fi
 # ── Argo 隧道 ──
