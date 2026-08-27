@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-08-27 — IPv4 全链路强制锁定（JP/HK 订阅回退根因，e3dc9c5）
+
+* **P0 IPv4 全链路 `ipv4_only`**：`sb-yg` 每次 `3-8-1 设置本地IP订阅 / 14-1 WARP / 5-3-1 域名分流` 重建 `sb.json` 会重置 `yg_kkk: prefer_ipv6`，导致 JP/HK `sb.json` 订阅更新后回退 v6、移动端仍 `2a06`。`lib/singbox.sh:force_ipv4_lock` 改原子单次 `jq` 锁 `route.rules[].strategy + dns.strategy/dns.servers[].strategy + outbounds direct/socks.domain_strategy = ipv4_only`，幂等（`cmp` 无变化不重启）、`gai.conf` 去重单行、`legacy env` 前置防 `FATAL`，`verify.sh` 同 `jq` 校验 `IPv4 锁定已生效`，`README/SKILL` 同步。双机热补验证 `inject prefer_ipv6 → jq ok → active → ipv4_only` 通过。
+* **P1 `lib/warp.sh` `mktemp` 模板**：`fix_mport_dup` `mktemp → mktemp /tmp/vpnplus-mport.XXXXXX` 防 `/tmp` 竞争。
+* **热补纪律**：热补仅测试阶段，线上回归一键 `deploy_singbox.sh --force` 单一入口，`cron/sub-argo` 热补已清，`busybox httpd -p` 常驻。
+
 ## 2026-08-27 — SSH 仅密钥 + sing-box 1.12+ 崩溃修复 + 全脚本审查（7台实测）
 
 * **P0 sing-box 1.12+ `legacy domain_strategy` FATAL 崩溃**：`sing-box 1.13.19` 对 `domain_strategy`/`strategy: prefer_ipv4/ipv4_only` 报 `legacy domain strategy options is deprecated ... FATAL ... ENABLE_DEPRECATED_LEGACY_DOMAIN_STRATEGY_OPTIONS=true`，导致 JP/HK 在 `force_ipv4_lock` 后 `activating/auto-restart 155次`、端口全失。新增 `lib/singbox.sh:ensure_singbox_legacy_env()`，在 `force_ipv4_lock()` 前注入 `Environment=ENABLE_DEPRECATED_LEGACY_DOMAIN_STRATEGY_OPTIONS=true` 到 `/etc/systemd/system/sing-box.service.d/99-vpnplus.conf`（兼容 sb/xr），`daemon-reload` 后自动重启，`verify.sh` 新增 `sing-box legacy env 已注入` 与 `gai.conf 单行` 校验。

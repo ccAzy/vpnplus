@@ -19,6 +19,7 @@ vpnplus 用来在 Debian/Ubuntu VPS 上快速部署代理节点，并自动完�
 - Hysteria2/Tuic5 端口跳跃（重跑前自动清理过期跳跃段 NAT 残留）
 - Argo 临时隧道 + **三级自愈保活**：进程挂掉重启、隧道僵死探测后自动重连换新域名、新域名自动同步进订阅
 - WARP 域名分流
+- **IPv4 强制锁定**：`route/dns/outbounds` 全链路 `ipv4_only`（`sb-yg` 重建回退 `prefer_ipv6` 自动纠回）、`gai.conf` 单行幂等、`sing-box 1.12+ legacy` 兼容（`ENABLE_DEPRECATED...`）
 - Clash/Mihomo、Sing-box 和通用订阅生成（**订阅端口重跑保持不变**，客户端地址长期有效）
 - 防主动探测和安全清理
 
@@ -137,6 +138,7 @@ SERVER_IP="你的服务器IP" bash verify.sh
 检查内容包括：
 
 - **时间同步**：`chrony Leap Normal` / `System clock synchronized` / `ntpdate` 偏移（P0，Reality/VMess 对时）
+- **IPv4 锁定**：`gai.conf 单行 / legacy env / route/outbounds/dns ipv4_only`（JP/HK 订阅回退根因）
 - sing-box 是否安装和运行
 - BBRv3 是否存在
 - fq 和网卡优化状态

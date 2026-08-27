@@ -32,6 +32,8 @@ description: >
 10. **iptables 持久化双保险**：端口跳跃/防探测规则除 netfilter-persistent 外，额外落盘 `/etc/iptables/rules.v4|v6` 并注册 `vpnplus-netfilter-restore.service`（network-pre.target 前恢复），防重启后 `ACVPN_*` 链丢失。
 11. **Argo 保活 v3**：flock 互斥 + 进程口径统一（`cloudflared+tunnel+--url`）+ cloudflared 路径自动探测 + 翻动检测冷却（防域名无限漂移）；纯单引号 heredoc 直写，消除 bash -c 双层转义风险。
 12. **sb.sh 哈希复审**：重跑时即使 sb 存在也校验哈希（原版或补丁白名单 `SB_PATCH_MARKER`），不在可信集合则重新下载。
+13. **IPv4 强制锁定**：`route.rules[].strategy / dns.strategy / outbounds direct/socks.domain_strategy` 原子 `jq` 改 `ipv4_only`，`sb-yg` 重建回退自动纠回，`verify.sh` 同 `jq` 校验。
+14. **gai/legacy 兼容**：`gai.conf precedence ::ffff:0:0/96 100` 去重单行幂等，`sing-box 1.12+ legacy` 前置 `Environment=ENABLE_DEPRECATED_LEGACY_DOMAIN_STRATEGY_OPTIONS=true` 防 `FATAL` 重启风暴。
 
 ## 部署流程（从第一步开始）
 
