@@ -163,6 +163,7 @@ install_dependencies() {
     ok "基础依赖安装完成"
 }
 
+if ! declare -F ensure_time_sync >/dev/null 2>&1; then
 ensure_time_sync() {
     info "校准系统时间（chrony 国内源）..."
     if $DRY_RUN; then info "[dry-run] 将配置 chrony 并同步时间"; return 0; fi
@@ -178,7 +179,6 @@ makestep 1 3
 rtcsync
 CHRONY
     systemctl enable --now chrony 2>/dev/null || systemctl restart chrony 2>/dev/null || true
-    # 立即拨正（chrony 3秒内 makestep）
     timeout 15 chronyc makestep 2>/dev/null || timeout 15 ntpdate -u ntp.aliyun.com 2>/dev/null || true
     sleep 2
     if chronyc tracking 2>/dev/null | grep -q 'Leap status.*Normal'; then
@@ -194,6 +194,7 @@ CHRONY
     fi
     manifest "time sync ensured via chrony"
 }
+fi
 
 # 先预检再访问 apt，避免非 Debian 系统在检查前就执行 apt-get。
 check_env
