@@ -103,9 +103,10 @@ run() {
 # ── 安装 sing-box-yg（固定 commit + 强制 SHA256 校验） ──
 if ! declare -F install_singbox_yg >/dev/null 2>&1; then
 install_singbox_yg() {
-    if command -v sb &>/dev/null && [ -f /etc/s-box/sb.json ]; then
-        ok "sing-box-yg 已安装，跳过"; return 0
+    if ! ${FORCE:-false} && command -v sb &>/dev/null && [ -f /etc/s-box/sb.json ]; then
+        ok "sing-box-yg 已安装，跳过（--force 覆盖）"; return 0
     fi
+    if ${FORCE:-false} && command -v sb &>/dev/null; then info "--force 已启用，强制重装 sing-box-yg"; fi
     if ! command -v sb &>/dev/null; then
         info "下载 sing-box-yg 管理脚本（锁定 commit ${SB_COMMIT:0:8}）..."
         local tmp="/tmp/sb.sh.download"
@@ -156,9 +157,10 @@ install_singbox_yg() {
     fi
     sleep 1
 
-    [ -f /etc/s-box/sb.json ] && { ok "sing-box 已安装，跳过"; return 0; }
-    systemctl is-active sb >/dev/null 2>&1 && { ok "sing-box 服务运行中"; return 0; }
-    systemctl is-active xr >/dev/null 2>&1 && { ok "xray 服务运行中"; return 0; }
+    if ! ${FORCE:-false} && [ -f /etc/s-box/sb.json ]; then ok "sing-box 已安装，跳过（--force 覆盖）"; return 0; fi
+    if ! ${FORCE:-false} && systemctl is-active sb >/dev/null 2>&1; then ok "sing-box 服务运行中"; return 0; fi
+    if ! ${FORCE:-false} && systemctl is-active xr >/dev/null 2>&1; then ok "xray 服务运行中"; return 0; fi
+    if ${FORCE:-false}; then info "--force 已启用，强制重装 sing-box"; rm -f /etc/s-box/sb.json 2>/dev/null || true; fi
 
     info "自动安装 sing-box（全默认配置，全程无需操作）..."
     sleep 2

@@ -30,17 +30,20 @@ done
 # ── 参数解析 ──
 NO_REBOOT=false
 DRY_RUN=false
+FORCE=false
 VERSION_PIN=""            # 可选：锁定 BBRv3 版本 (如 7.3.2)
 for arg in "$@"; do
     case "$arg" in
         --no-reboot) NO_REBOOT=true ;;
         --dry-run)   DRY_RUN=true ;;
+        --force)     FORCE=true ;;
         VERSION_PIN=*) VERSION_PIN="${arg#VERSION_PIN=}" ;;
         --help|-h) cat <<'HELP'
 vpnplus deploy_optimize.sh — 服务器暴力优化（BBRv3 + 网络极限压榨）
-用法: bash deploy_optimize.sh [--no-reboot] [--dry-run] [VERSION_PIN=x.y.z]
+用法: bash deploy_optimize.sh [--no-reboot] [--dry-run] [--force] [VERSION_PIN=x.y.z]
   --no-reboot            完成优化后不自动重启（手动 reboot 生效）
   --dry-run              只打印将执行的动作，不实际修改系统
+  --force                已优化也重跑（覆盖安装，`bash <(curl ...) --force` 一键重跑）
   VERSION_PIN=x.y.z      锁定 BBRv3 内核版本；缺省时取 release 最新并强制校验
 HELP
         exit 0 ;;
@@ -115,9 +118,13 @@ case "$ARCH" in x86_64) DEB_ARCH="amd64" ;; aarch64) DEB_ARCH="arm64" ;; *) DEB_
 CUR_KERNEL=$(uname -r)
 
 # ── 幂等检测（提前执行，无需联网/装依赖） ──
+if $FORCE; then info "--force 已启用，强制重跑全流程"; rm -f "$MARK" 2>/dev/null || true; fi
 if [ -f "$MARK" ]; then
     if echo "$CUR_KERNEL" | grep -q "bbrv3"; then
-        logo=$(cat <<'EOF'
+        if $FORCE; then
+            info "--force 已启用，忽略已生效标记，继续重跑"
+        else
+            logo=$(cat <<'EOF'
   ██╗   ██╗██████╗ ███╗   ██╗██╗   ██╗██████╗ ██╗     ██╗   ██╗███████╗
   ██║   ██║██╔══██╗████╗  ██║██║   ██║██╔══██╗██║     ██║   ██║██╔════╝
   ██║   ██║██████╔╝██╔██╗ ██║██║   ██║██████╔╝██║     ██║   ██║███████╗
@@ -131,9 +138,10 @@ EOF
         echo -e "  ${WHITE}当前内核: ${GREEN}$CUR_KERNEL${N}"
         echo ""
         ok "BBRv3 已生效，无需再次执行"
-        info "如需强制重新优化：rm -f $MARK && bash deploy_optimize.sh"
+        info "如需强制重新优化：bash deploy_optimize.sh --force"
         echo ""
         exit 0
+        fi
     else
         warn "标记文件存在但内核未使用 BBRv3（可能已更新），重新执行优化"
         if $DRY_RUN; then

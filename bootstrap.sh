@@ -19,16 +19,19 @@ done
 
 DRY_RUN=false
 CHECK_ONLY=false
+FORCE=false
 for arg in "$@"; do
     case "$arg" in
         --dry-run) DRY_RUN=true ;;
         --check-only) CHECK_ONLY=true ;;
+        --force) FORCE=true ;;
         --help|-h)
             cat <<'HELP'
 vpnplus bootstrap.sh — 环境准备与依赖检查
-用法: bash bootstrap.sh [--dry-run] [--check-only]
+用法: bash bootstrap.sh [--dry-run] [--check-only] [--force]
   --dry-run    只显示将安装的包，不修改系统
   --check-only 只检查，不执行 apt update/install
+  --force      已安装也重装（覆盖安装，`bash <(curl ...) --force` 一键重跑）
 HELP
             exit 0 ;;
     esac
@@ -75,6 +78,10 @@ for pkg in "${PACKAGES[@]}"; do
     esac
 done
 
+if $FORCE && [ "${#missing[@]}" -eq 0 ]; then
+    info "--force 已启用，重装基础依赖"
+    missing=("${PACKAGES[@]}")
+fi
 if [ "${#missing[@]}" -eq 0 ]; then
     ok "基础依赖已齐全"
 elif $CHECK_ONLY; then

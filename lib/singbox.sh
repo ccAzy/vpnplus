@@ -25,9 +25,10 @@ sb_feed() {  # sb_feed <超时秒数> - <<'KEYS'  ... KB: 用 stdin 传入按键
 
 
 install_singbox_yg() {
-    if command -v sb &>/dev/null && [ -f /etc/s-box/sb.json ]; then
-        ok "sing-box-yg 已安装，跳过"; return 0
+    if ! ${FORCE:-false} && command -v sb &>/dev/null && [ -f /etc/s-box/sb.json ]; then
+        ok "sing-box-yg 已安装，跳过（--force 覆盖）"; return 0
     fi
+    if ${FORCE:-false} && command -v sb &>/dev/null; then info "--force 已启用，强制重装 sing-box-yg"; fi
     if ! command -v sb &>/dev/null; then
         info "下载 sing-box-yg 管理脚本（锁定 commit ${SB_COMMIT:0:8}）..."
         local tmp="/tmp/sb.sh.download"
