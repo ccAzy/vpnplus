@@ -1,6 +1,7 @@
 run-1/
 __pycache__/
 *.pyc
+dist/
 
 servers.json
 config.yaml
