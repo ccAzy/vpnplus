@@ -16,7 +16,7 @@ set -euo pipefail
 
 # ── lib 加载（保持一键裸装兼容：lib 存在则 source，否则用内联兜底） ──
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-for _lib in common time firewall singbox subscription argo warp ssh; do
+for _lib in common time firewall singbox subscription argo warp; do
     if [ -f "$SCRIPT_DIR/lib/${_lib}.sh" ]; then source "$SCRIPT_DIR/lib/${_lib}.sh" 2>/dev/null || true
     elif [ -f "lib/${_lib}.sh" ]; then source "lib/${_lib}.sh" 2>/dev/null || true
     elif [ -f "/usr/local/lib/vpnplus/${_lib}.sh" ]; then source "/usr/local/lib/vpnplus/${_lib}.sh" 2>/dev/null || true
@@ -1093,8 +1093,7 @@ fi
     step "5" "安全加固 + 防主动探测（独立链）"
     apply_hardening
     apply_antiprobe || true
-    # SSH 密钥-only 与 sing-box 1.12+ 兼容环境变量（2026-08-27 JP/HK 故障根因）
-    if declare -F ensure_ssh_keyonly >/dev/null 2>&1; then ensure_ssh_keyonly || true; fi
+    # sing-box 1.12+ 兼容环境变量（2026-08-27 JP/HK 崩溃根因：legacy domain_strategy 需注入）
     if declare -F ensure_singbox_legacy_env >/dev/null 2>&1; then ensure_singbox_legacy_env || true; fi
 
     step "6" "WARP + 域名分流（可选）"
