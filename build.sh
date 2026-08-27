@@ -16,9 +16,24 @@ inline_lib() {
     echo ""
 }
 
-# deploy_optimize 单文件 = 头 + lib/common + lib/time + lib/optimize + 主体编排
-# 为简化，现阶段直接拷贝已自包含的原文件（已含 fallback），保证 curl 可用
-# 下一阶段可改为真正内联组装
+# 校验：单文件必须包含 lib 对应逻辑（保证改 lib 后单文件同步，否则低成本变更失效）
+check_sync() {
+    local ok=true
+    for lib in lib/common.sh lib/time.sh lib/optimize.sh; do
+        local base
+        base=$(basename "$lib")
+        # 取 lib 关键函数名，检查单文件是否包含
+        local func
+        func=$(grep -oE '^[a-z_]+\(\)' "$lib" 2>/dev/null | head -1 | tr -d '()')
+        if [ -n "$func" ] && ! grep -q "$func" deploy_optimize.sh 2>/dev/null; then
+            echo "WARN: $lib:$func 未同步到 deploy_optimize.sh (改 lib 后需同步单文件)"
+            ok=false
+        fi
+    done
+    $ok || echo "提示: 改 lib 后请同步更新对应单文件，或跑 bash build.sh --sync" 
+}
+check_sync || true
+
 for src in deploy_optimize.sh deploy_singbox.sh verify.sh bootstrap.sh cleanup.sh; do
     if [ -f "$src" ]; then
         cp "$src" "$DIST/$src"
