@@ -205,14 +205,20 @@ if $DRY_RUN; then
 fi
 install_dependencies || exit 1
 ensure_time_sync
-# ── IPv4 优先（防 raw.githubusercontent 等 v6 黑洞导致 curl 卡 75s） ──
-if grep -q 'precedence ::ffff:0:0/96 100' /etc/gai.conf 2>/dev/null; then
+# ── IPv4 优先（防 raw.githubusercontent 等 v6 黑洞导致 curl 卡 75s）── 幂等去重单行
+ensure_gai_ipv4() {
+    if grep -q '^precedence ::ffff:0:0/96 100' /etc/gai.conf 2>/dev/null && [ "$(grep -c '^precedence ::ffff:0:0/96 100' /etc/gai.conf 2>/dev/null)" -eq 1 ]; then return 0; fi
+    grep -v '^precedence ::ffff:0:0/96' /etc/gai.conf > /tmp/gai.clean 2>/dev/null || true
+    cat /tmp/gai.clean > /etc/gai.conf 2>/dev/null || true
+    echo 'precedence ::ffff:0:0/96 100' >> /etc/gai.conf 2>/dev/null
+}
+if grep -q '^precedence ::ffff:0:0/96 100' /etc/gai.conf 2>/dev/null && [ "$(grep -c '^precedence ::ffff:0:0/96 100' /etc/gai.conf 2>/dev/null)" -eq 1 ]; then
     ok "gai.conf 已设 IPv4 优先"
 else
     if $DRY_RUN; then
-        info "[dry-run] 将写入 /etc/gai.conf：precedence ::ffff:0:0/96 100（IPv4 优先）"
+        info "[dry-run] 将写入 /etc/gai.conf：precedence ::ffff:0:0/96 100（IPv4 优先，去重单行）"
     else
-        echo 'precedence ::ffff:0:0/96 100' >> /etc/gai.conf 2>/dev/null && ok "已设 IPv4 优先（/etc/gai.conf）" || warn "写入 /etc/gai.conf 失败（IPv4 优先未生效）"
+        ensure_gai_ipv4 && ok "已设 IPv4 优先（/etc/gai.conf，去重单行）" || warn "写入 /etc/gai.conf 失败"
     fi
 fi
 for dep in curl jq git xz tmux ip iptables ss tc systemctl; do

@@ -147,4 +147,58 @@ apply_argo_patch() {
     return 0
 }
 
+# sing-box 1.12+ legacy domain_strategy 兼容：必须注入环境变量否则 FATAL
+ensure_singbox_legacy_env() {
+    local dropin="/etc/systemd/system/sing-box.service.d/99-vpnplus.conf"
+    local need_restart=false
+    # 确保 drop-in 存在且包含 Environment
+    if [ ! -f "$dropin" ] || ! grep -q "ENABLE_DEPRECATED_LEGACY_DOMAIN_STRATEGY_OPTIONS" "$dropin" 2>/dev/null; then
+        if ${DRY_RUN:-false}; then
+            info "[dry-run] 将写入 $dropin: Environment=ENABLE_DEPRECATED_LEGACY_DOMAIN_STRATEGY_OPTIONS=true"
+            return 0
+        fi
+        mkdir -p "$(dirname "$dropin")" 2>/dev/null || true
+        # 保留原有 LimitNOFILE，若不存在则新建
+        if [ -f "$dropin" ]; then
+            grep -q "LimitNOFILE" "$dropin" 2>/dev/null || echo "LimitNOFILE=1048576" >> "$dropin"
+        else
+            cat > "$dropin" <<'EOF'
+[Service]
+LimitNOFILE=1048576
+EOF
+        fi
+        if ! grep -q "ENABLE_DEPRECATED_LEGACY_DOMAIN_STRATEGY_OPTIONS" "$dropin" 2>/dev/null; then
+            echo "Environment=ENABLE_DEPRECATED_LEGACY_DOMAIN_STRATEGY_OPTIONS=true" >> "$dropin"
+            ok "已注入 sing-box 兼容环境变量 ($dropin)"
+            need_restart=true
+        fi
+        # 兼容 sb/xr 服务也注入（若存在）
+        for svc in sb xr; do
+            if [ -f "/etc/systemd/system/${svc}.service" ]; then
+                local d="/etc/systemd/system/${svc}.service.d/99-vpnplus.conf"
+                mkdir -p "$(dirname "$d")" 2>/dev/null || true
+                grep -q "ENABLE_DEPRECATED" "$d" 2>/dev/null || echo -e "[Service]\nEnvironment=ENABLE_DEPRECATED_LEGACY_DOMAIN_STRATEGY_OPTIONS=true" > "$d"
+            fi
+        done
+        systemctl daemon-reload 2>/dev/null || true
+        # 若当前 sing-box 正在运行，重启以生效
+        if systemctl is-active sing-box >/dev/null 2>&1; then
+            systemctl try-restart sing-box 2>/dev/null || systemctl restart sing-box 2>/dev/null || true
+            sleep 2
+            need_restart=false
+        fi
+    fi
+    # 额外校验：若仍在 crash loop，强制重启一次
+    if systemctl is-failed sing-box >/dev/null 2>&1; then
+        warn "检测到 sing-box 失败状态，尝试重启"
+        systemctl restart sing-box 2>/dev/null || true
+        sleep 2
+    fi
+    if systemctl is-active sing-box >/dev/null 2>&1; then
+        ok "sing-box 运行正常（legacy env 已生效）"
+    else
+        warn "sing-box 仍未运行，请检查 journalctl -u sing-box"
+    fi
+}
+
 

@@ -62,7 +62,7 @@ echo ""
 
 if [ "$FORCE" != "--force" ]; then
     echo -e "${YELLOW}警告：将清除所有 sing-box 相关配置、进程、定时任务。${N}"
-    if [ -t 0 ]; then read -p "确认继续？[y/N] " confirm; else confirm=n; fi
+    if [ -t 0 ]; then read -r -p "确认继续？[y/N] " confirm; else confirm=n; fi
     [ "$confirm" != "y" ] && [ "$confirm" != "Y" ] && { echo "已取消"; exit 0; }
 fi
 

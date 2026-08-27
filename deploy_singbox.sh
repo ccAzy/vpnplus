@@ -16,10 +16,10 @@ set -euo pipefail
 
 # ── lib 加载（保持一键裸装兼容：lib 存在则 source，否则用内联兜底） ──
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-for _lib in common time firewall singbox subscription argo warp; do
-    if [ -f "$SCRIPT_DIR/lib/${_lib}.sh" ]; then source "$SCRIPT_DIR/lib/${_lib}.sh"
-    elif [ -f "lib/${_lib}.sh" ]; then source "lib/${_lib}.sh"
-    elif [ -f "/usr/local/lib/vpnplus/${_lib}.sh" ]; then source "/usr/local/lib/vpnplus/${_lib}.sh"
+for _lib in common time firewall singbox subscription argo warp ssh; do
+    if [ -f "$SCRIPT_DIR/lib/${_lib}.sh" ]; then source "$SCRIPT_DIR/lib/${_lib}.sh" 2>/dev/null || true
+    elif [ -f "lib/${_lib}.sh" ]; then source "lib/${_lib}.sh" 2>/dev/null || true
+    elif [ -f "/usr/local/lib/vpnplus/${_lib}.sh" ]; then source "/usr/local/lib/vpnplus/${_lib}.sh" 2>/dev/null || true
     fi
 done
 
@@ -441,6 +441,8 @@ force_ipv4_lock() {
     info "锁定 IPv4（直连/WARP 强制 ipv4_only，压延迟）..."
     if [ ! -f /etc/s-box/sb.json ]; then warn "sb.json 不存在，跳过 IPv4 锁定"; return 0; fi
     if $DRY_RUN; then info "[dry-run] 将把 sb.json 的 prefer_ipv4 → ipv4_only 并重载"; return 0; fi
+    # 先确保 legacy env 已注入，否则 1.12+ 会 FATAL 导致 sing-box 无法启动（2026-08-27 JP/HK 实测）
+    if declare -F ensure_singbox_legacy_env >/dev/null 2>&1; then ensure_singbox_legacy_env || true; fi
     local changed=false
     if grep -q prefer_ipv4 /etc/s-box/sb.json 2>/dev/null; then
         cp /etc/s-box/sb.json /etc/s-box/sb.json.bak.ipv4 2>/dev/null || true
@@ -453,7 +455,16 @@ force_ipv4_lock() {
     else
         jq '.outbounds |= map(if .type=="direct" or .type=="socks" then .domain_strategy="ipv4_only" else . end)' /etc/s-box/sb.json > /tmp/sb.json.tmp 2>/dev/null && cat /tmp/sb.json.tmp > /etc/s-box/sb.json && rm -f /tmp/sb.json.tmp && changed=true
     fi
-    if $changed; then systemctl try-restart sing-box 2>/dev/null || systemctl restart sing-box 2>/dev/null || true; sleep 2; ok "IPv4 锁定完成，已重载 sing-box"; else info "已是 ipv4_only，无需变更"; fi
+    if $changed; then
+        # 校验 JSON 合法性，避免写入损坏导致无法启动
+        if ! jq empty /etc/s-box/sb.json 2>/dev/null; then
+            warn "sb.json JSON 校验失败，回滚备份"
+            cp /etc/s-box/sb.json.bak.ipv4 /etc/s-box/sb.json 2>/dev/null || true
+            return 1
+        fi
+        systemctl try-restart sing-box 2>/dev/null || systemctl restart sing-box 2>/dev/null || true; sleep 2
+        if systemctl is-active sing-box >/dev/null 2>&1; then ok "IPv4 锁定完成，已重载 sing-box"; else warn "IPv4 锁定后 sing-box 未运行，请检查 journalctl -u sing-box"; fi
+    else info "已是 ipv4_only，无需变更"; fi
 }
 fi
 # ── Argo 隧道 ──
@@ -829,7 +840,7 @@ fix_mport_dup() {
         # 仅当出现重复逗号段时处理
         if grep -q 'mport=' "$f" 2>/dev/null && grep -q 'mport=.*,' "$f" 2>/dev/null; then
             local tmp
-            tmp=$(mktemp)
+            tmp=$(mktemp /tmp/vpnplus-mport.XXXXXX)
             # 逐行：把 mport= 后的逗号列表去重（保留首次出现顺序）
             python3 - "$f" "$tmp" <<'PY' 2>/dev/null || true
 import sys, re
@@ -1082,6 +1093,9 @@ fi
     step "5" "安全加固 + 防主动探测（独立链）"
     apply_hardening
     apply_antiprobe || true
+    # SSH 密钥-only 与 sing-box 1.12+ 兼容环境变量（2026-08-27 JP/HK 故障根因）
+    if declare -F ensure_ssh_keyonly >/dev/null 2>&1; then ensure_ssh_keyonly || true; fi
+    if declare -F ensure_singbox_legacy_env >/dev/null 2>&1; then ensure_singbox_legacy_env || true; fi
 
     step "6" "WARP + 域名分流（可选）"
     setup_warp

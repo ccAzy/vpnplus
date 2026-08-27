@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-08-27 — SSH 仅密钥 + sing-box 1.12+ 崩溃修复 + 全脚本审查（7台实测）
+
+* **P0 sing-box 1.12+ `legacy domain_strategy` FATAL 崩溃**：`sing-box 1.13.19` 对 `domain_strategy`/`strategy: prefer_ipv4/ipv4_only` 报 `legacy domain strategy options is deprecated ... FATAL ... ENABLE_DEPRECATED_LEGACY_DOMAIN_STRATEGY_OPTIONS=true`，导致 JP/HK 在 `force_ipv4_lock` 后 `activating/auto-restart 155次`、端口全失。新增 `lib/singbox.sh:ensure_singbox_legacy_env()`，在 `force_ipv4_lock()` 前注入 `Environment=ENABLE_DEPRECATED_LEGACY_DOMAIN_STRATEGY_OPTIONS=true` 到 `/etc/systemd/system/sing-box.service.d/99-vpnplus.conf`（兼容 sb/xr），`daemon-reload` 后自动重启，`verify.sh` 新增 `sing-box legacy env 已注入` 与 `gai.conf 单行` 校验。
+* **P0 线上 SSH 已手工加固为仅密钥**（不入脚本，脚本仅负责协议节点部署）：7台线上节点已手工执行 `PasswordAuthentication no / PermitRootLogin prohibit-password` 并验证 `sshd -T`，此加固逻辑已从部署脚本中移除，保持脚本职责单一。
+* **P1 gai.conf 幂等去重**：`bootstrap.sh`/`deploy_optimize.sh` 原 `echo 'precedence ...' >> /etc/gai.conf` 会累积重复（实测 2行），现改为 `grep -v '^precedence ::ffff:0:0/96' > /tmp/gai.clean; echo 'precedence ::ffff:0:0/96 100' >>` 单行幂等，`verify.sh` 校验 `grep -c ==1`。
+* **P1 mktemp 安全**：`deploy_singbox.sh:fix_mport_dup` 的 `tmp=$(mktemp)` 改为 `mktemp /tmp/vpnplus-mport.XXXXXX`，防 `/tmp` 竞争。
+* **P2 cleanup.sh `read -r`**：`read -p` 改为 `read -r -p`，防反斜杠转义。
+* **全面 shellcheck 审查**：`shellcheck 0.11.0` 全量扫描 5脚本+lib，剩余仅 SC1090（动态 source）与 SC2015（`A && ok || warn`  intentional 三元）已确认不改，SC2034/2162 已修复。
+* **影响面**：JP/HK 已从 crash loop 恢复 `active (running)`，订阅 `http://IP:PORT/token/clmi.yaml` 实测 200，`verify.sh` 新增 legacy/gai 两项均通过。
+
 ## 2026-08-27 — 时钟与 TUIC 单点故障修复（rn1 实测）
 
 * **P0 时钟漂移（`bad timestamp` 全不通）**：`deploy_optimize.sh`/`deploy_singbox.sh` 的 `install_dependencies` 新增 `chrony`，新增 `ensure_time_sync()`（国内源 `ntp.aliyun/ntp1.aliyun/cn.pool/pool.ntp` + `makestep 1 3` + `rtcsync`，`systemctl enable --now chrony` 并 `chronyc makestep` 即时拨正），`verify.sh` 新增 `chrony Leap Normal` / `System clock synchronized` / `ntpdate -q` 偏移检查。rn1 实测 `System clock synchronized: no` / `chronyc: command not found`，修复后 `Stratum 2 Normal`。
@@ -29,7 +39,8 @@
 - **`cleanup.sh` 进程口径统一**：`kill_procs`/`verify_clean` 改用 `cloudflared.*tunnel.*--url`，与保活脚本一致；`pgrep -fc` 改用 `pgrep -f | wc -l` 防自匹配误计。
 - **审计方法论沉淀**：全面审计读完全部 5 脚本+CHANGELOG+SKILL，逐项标注优先级与诚实边界（需真机确认项以#3/#5 类锚点标出，余皆代码直接判定）。
 
-## 2026-08-24 — 稳定性修复（所有改动已在 HK 服务器 85.121.51.211 实测验证）
+## 2026-08-24 — 稳定性修复（所有改动已在 HK 服务器 HK 实测验证）
+## 2026-08-24 — 稳定性修复（所有改动已在 HK 节点实测验证）
 
 - **`deploy_singbox.sh` Argo 临时隧道保活升级 v2（三级自愈）**：原保活只查进程是否存在，进程僵死（连接边缘断开）时不处理、重连后也不同步新域名。v2 改为：
   - **L1** 进程缺失 → 重启

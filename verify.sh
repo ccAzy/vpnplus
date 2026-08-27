@@ -90,6 +90,17 @@ fi
 # 日志轮转配置
 if [ -f /etc/logrotate.d/vpnplus ]; then ok "日志轮转配置存在"; PASS=$((PASS + 1)); else warn "未检测到 logrotate 配置"; fi
 
+# 1a. SSH 仅密钥（P0：密码泄露=整机沦陷）
+echo "--- SSH 加固 ---"
+if grep -qE "^PasswordAuthentication no" /etc/ssh/sshd_config 2>/dev/null; then ok "PasswordAuthentication no（仅密钥）"; PASS=$((PASS+1)); else fail "PasswordAuthentication 未设 no（仍允许密码，风险高）"; FAIL=$((FAIL+1)); fi
+if sshd -T -f /etc/ssh/sshd_config 2>/dev/null | grep -qi "^passwordauthentication no"; then ok "sshd -T 验证 PasswordAuthentication no"; PASS=$((PASS+1)); else warn "sshd -T 仍为 yes（可能被 Include 覆盖，需检查 sshd_config.d）"; fi
+if [ -f /usr/local/etc/sshd_config ] && ! grep -qE "^PasswordAuthentication no" /usr/local/etc/sshd_config 2>/dev/null; then warn "/usr/local/etc/sshd_config 未加固（若使用 /usr/local/sbin/sshd 则风险）"; fi
+if grep -qE "^PermitRootLogin prohibit-password" /etc/ssh/sshd_config 2>/dev/null; then ok "PermitRootLogin prohibit-password"; PASS=$((PASS+1)); else warn "PermitRootLogin 未设 prohibit-password"; fi
+# 1b. sing-box 1.12+ legacy 环境变量（2026-08-27 JP/HK 崩溃根因）
+echo "--- sing-box 兼容 ---"
+if grep -q "ENABLE_DEPRECATED_LEGACY_DOMAIN_STRATEGY_OPTIONS" /etc/systemd/system/sing-box.service.d/99-vpnplus.conf 2>/dev/null; then ok "sing-box legacy env 已注入"; PASS=$((PASS+1)); else warn "sing-box legacy env 缺失（1.12+ 会 FATAL 崩溃，需 ensure_singbox_legacy_env）"; fi
+if grep -q "^precedence ::ffff:0:0/96 100" /etc/gai.conf 2>/dev/null && [ "$(grep -c "^precedence ::ffff:0:0/96 100" /etc/gai.conf 2>/dev/null)" -eq 1 ]; then ok "gai.conf IPv4 优先单行"; PASS=$((PASS+1)); else warn "gai.conf 重复或缺失 precedence ::ffff:0:0/96 100（去重后应为单行）"; fi
+
 # 1b. 时间同步（P0：Reality/VMess 握手对时，漂移>90s 全不通，但端口照常通）
 if declare -F verify_time >/dev/null 2>&1; then verify_time; else
     echo "--- 时间同步 ---"

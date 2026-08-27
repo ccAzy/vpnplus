@@ -101,16 +101,25 @@ else
     ok "部署所需基础命令已可用"
 fi
 
-# ── IPv4 优先（防 raw.githubusercontent 等 v6 黑洞导致 curl 卡 75s） ──
+# ── IPv4 优先（防 raw.githubusercontent 等 v6 黑洞导致 curl 卡 75s）──
+# 幂等去重：移除所有旧 precedence ::ffff:0:0/96 行，仅保留一行
+ensure_gai_ipv4() {
+    if grep -q '^precedence ::ffff:0:0/96 100' /etc/gai.conf 2>/dev/null && [ "$(grep -c '^precedence ::ffff:0:0/96 100' /etc/gai.conf 2>/dev/null)" -eq 1 ]; then
+        return 0
+    fi
+    grep -v '^precedence ::ffff:0:0/96' /etc/gai.conf > /tmp/gai.clean 2>/dev/null || true
+    cat /tmp/gai.clean > /etc/gai.conf 2>/dev/null || true
+    echo 'precedence ::ffff:0:0/96 100' >> /etc/gai.conf 2>/dev/null
+}
 if $CHECK_ONLY; then
-    grep -q 'precedence ::ffff:0:0/96 100' /etc/gai.conf 2>/dev/null && ok "gai.conf 已设 IPv4 优先" || warn "gai.conf 未设 IPv4 优先（建议：precedence ::ffff:0:0/96 100）"
+    grep -q '^precedence ::ffff:0:0/96 100' /etc/gai.conf 2>/dev/null && ok "gai.conf 已设 IPv4 优先" || warn "gai.conf 未设 IPv4 优先（建议：precedence ::ffff:0:0/96 100）"
 elif $DRY_RUN; then
-    grep -q 'precedence ::ffff:0:0/96 100' /etc/gai.conf 2>/dev/null && info "[dry-run] gai.conf 已是 IPv4 优先，跳过" || info "[dry-run] 将写入 /etc/gai.conf：precedence ::ffff:0:0/96 100（IPv4 优先）"
+    grep -q '^precedence ::ffff:0:0/96 100' /etc/gai.conf 2>/dev/null && info "[dry-run] gai.conf 已是 IPv4 优先，跳过" || info "[dry-run] 将写入 /etc/gai.conf：precedence ::ffff:0:0/96 100（IPv4 优先，去重后单行）"
 else
-    if grep -q 'precedence ::ffff:0:0/96 100' /etc/gai.conf 2>/dev/null; then
+    if grep -q '^precedence ::ffff:0:0/96 100' /etc/gai.conf 2>/dev/null && [ "$(grep -c '^precedence ::ffff:0:0/96 100' /etc/gai.conf 2>/dev/null)" -eq 1 ]; then
         ok "gai.conf 已设 IPv4 优先"
     else
-        echo 'precedence ::ffff:0:0/96 100' >> /etc/gai.conf 2>/dev/null && ok "已设 IPv4 优先（/etc/gai.conf）" || warn "写入 /etc/gai.conf 失败（IPv4 优先未生效）"
+        ensure_gai_ipv4 && ok "已设 IPv4 优先（/etc/gai.conf，去重单行）" || warn "写入 /etc/gai.conf 失败（IPv4 优先未生效）"
     fi
 fi
 
