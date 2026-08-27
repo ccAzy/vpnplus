@@ -38,6 +38,7 @@ readonly SB_PATCH_MARKER="/etc/s-box/.sb-argo-patched.sha256"
 #       而 timeout 只杀最外层 → 留下孤儿 sb 进程，脚本被卡死等同"中断"。
 # 解决：包装所有 sb 菜单调用，末尾补多组 0（逐层返回/退出），超时后清理本次会话遗留的 sb。
 #       pkill 只针对"本次 sb_feed 期间新出现"的 sb 进程（用前后 PID 差集），不误伤同机手动开的 sb 面板。
+if ! declare -F sb_feed >/dev/null 2>&1; then
 sb_feed() {  # sb_feed <超时秒数> - <<'KEYS'  ... KB: 用 stdin 传入按键
     local secs="${1:-120}"; shift
     local out _before _after _pid _new_pids=""
@@ -56,7 +57,7 @@ sb_feed() {  # sb_feed <超时秒数> - <<'KEYS'  ... KB: 用 stdin 传入按键
     fi
     printf '%s' "$out"
 }
-
+fi
 DRY_RUN=false
 VMESS_LOCK="${VMESS_LOCK:-off}"     # 用户明确不需要防火墙：vmess 明文端口公网直连（不再锁回环）
 RESET_SUB="${RESET_SUB:-0}"         # RESET_SUB=1 强制轮转订阅 token/端口（暴露后一键换链）
@@ -97,6 +98,7 @@ run() {
     "$@"
 }
 # ── 安装 sing-box-yg（固定 commit + 强制 SHA256 校验） ──
+if ! declare -F install_singbox_yg >/dev/null 2>&1; then
 install_singbox_yg() {
     if command -v sb &>/dev/null && [ -f /etc/s-box/sb.json ]; then
         ok "sing-box-yg 已安装，跳过"; return 0
@@ -173,7 +175,7 @@ install_singbox_yg() {
     fail "sing-box 未能自动完成安装"; info "修复后重试: bash deploy_singbox.sh"
     return 1
 }
-
+fi
 # ── 环境预检 + 第二阶段依赖兜底 ──
 check_env() {
     if [ "$(id -u)" -ne 0 ]; then fail "需要 root 权限"; return 1; fi
@@ -207,6 +209,7 @@ check_env() {
     return 0
 }
 
+if ! declare -F ensure_time_sync >/dev/null 2>&1; then
 ensure_time_sync() {
     info "校准系统时间（chrony 国内源）..."
     if $DRY_RUN; then info "[dry-run] 将配置 chrony 并同步时间"; return 0; fi
@@ -223,7 +226,9 @@ CHRONY
     sleep 2
     if chronyc tracking 2>/dev/null | grep -q 'Leap status.*Normal'; then ok "时间已同步（chrony Normal）"; else warn "chrony 尚未 Normal，稍后自动追上"; fi
 }
+fi
 # ── 订阅配置 ──
+if ! declare -F setup_subscription >/dev/null 2>&1; then
 setup_subscription() {
     info "配置本地订阅链接..."
     sleep 1
@@ -282,8 +287,9 @@ EOSUB
     warn "订阅配置产物未生成（sb 菜单结构可能已变更）"; info "手动: sb → 3 → 8 → 1"
     return 1
 }
-
+fi
 # ── 获取订阅端口（多源探测） ──
+if ! declare -F get_sub_port >/dev/null 2>&1; then
 get_sub_port() {
     local port=""
     if [ -f /etc/s-box/subport.log ]; then
@@ -293,7 +299,8 @@ get_sub_port() {
     port=$(ss -tlnp 2>/dev/null | grep -iE 'busybox|httpd|lighttpd|nginx' | awk '{print $4}' | grep -oE '[0-9]+$' | head -1 || true)
     echo "$port"
 }
-
+fi
+if ! declare -F wait_subscription >/dev/null 2>&1; then
 wait_subscription() {
     info "等待订阅服务启动..."
     local SUB_PORT="" i
@@ -310,9 +317,10 @@ wait_subscription() {
         warn "订阅服务超时未启动（已等 60s）"
     fi
 }
-
+fi
 # ── Hysteria2 + Tuic 端口跳跃（独立命名链，绝不触碰第三方 NAT 规则） ──
 CHAIN_PORTHOP="ACVPN_PORTHOP"
+if ! declare -F config_port_hopping >/dev/null 2>&1; then
 config_port_hopping() {
     [ -f /etc/s-box/sb.json ] || { warn "sb.json 不存在，跳过端口跳跃"; return 1; }
     info "配置端口跳跃（独立链 $CHAIN_PORTHOP）..."
@@ -369,7 +377,9 @@ config_port_hopping() {
     # iptables 持久化（统一走 persist_firewall：含自建恢复 unit，防重启丢失）
     persist_firewall
 }
+fi
 # ── WARP-plus-Socks5 ──
+if ! declare -F setup_warp >/dev/null 2>&1; then
 setup_warp() {
     info "清理旧 WARP 残留..."
     run pkill -9 -f sbwpph 2>/dev/null || true
@@ -394,8 +404,9 @@ EOSUB
     elif [ -f /etc/s-box/sbwpph ]; then warn "WARP 文件存在但进程未运行，尝试: sb → 14 → 1"
     else warn "WARP 安装失败（不影响核心代理功能，域名分流不可用）"; fi
 }
-
+fi
 # ── 域名分流（AI + 流媒体 + 搜索引擎走 WARP） ──
+if ! declare -F setup_domain_routing >/dev/null 2>&1; then
 setup_domain_routing() {
     if [ ! -f /etc/s-box/sbwpph ] || ! pgrep -f sbwpph >/dev/null; then
         warn "WARP 未运行，跳过域名分流"; return 0
@@ -420,8 +431,9 @@ EOSUB
     if [ "${CHECK:-0}" -gt 0 ]; then ok "域名分流已配置，AI + 流媒体 + 搜索引擎走 WARP"
     else warn "分流配置可能未完全生效，可稍后手动 sb → 5 检查"; fi
 }
-
+fi
 # ── Argo 隧道 ──
+if ! declare -F start_argo >/dev/null 2>&1; then
 start_argo() {
     [ -f /etc/s-box/sb.json ] || { warn "sb.json 不存在，跳过 Argo"; return 1; }
     info "通过 sb-yg 自动配置 Argo 临时隧道..."
@@ -455,8 +467,9 @@ EOSUB
         warn "Argo 隧道未启动，使用直连 IP"; info "稍后手动: sb → 3 → 3 → 1 → 1"
     fi
 }
-
+fi
 # ── 安全加固（网络感知：IPv6 无地址才关 RA；rp_filter 可覆盖） ──
+if ! declare -F apply_hardening >/dev/null 2>&1; then
 apply_hardening() {
     local conf="/etc/sysctl.d/99-vpnplus-security.conf"
     local v6_ra_lines
@@ -507,7 +520,9 @@ LIMIT"
         ok "systemd LimitNOFILE=1048576 已生效 (sing-box/sb/xr)"
     fi
 }
+fi
 # ── Argo 传输协议优化补丁（http2 → auto，QUIC 优先抗丢包） ──
+if ! declare -F apply_argo_patch >/dev/null 2>&1; then
 apply_argo_patch() {
     [ -f /usr/bin/sb ] || { warn "sb.sh 不存在，跳过 Argo 协议补丁"; return 1; }
     if grep -q -- '--protocol http2' /usr/bin/sb; then
@@ -530,8 +545,9 @@ apply_argo_patch() {
     fi
     return 0
 }
-
+fi
 # ── Argo 临时隧道保活（掉线自动拉起 + 刷新订阅） ──
+if ! declare -F install_argo_keepalive >/dev/null 2>&1; then
 install_argo_keepalive() {
     if $DRY_RUN; then
         info "[dry-run] 写入 /usr/local/sbin/vpnplus-argo-keepalive.sh（flock互斥+僵死重连+翻动告警）"
@@ -671,12 +687,13 @@ KEEP
     fi
     ok "Argo 保活 v3 已安装（每 3 分钟：flock互斥 + 进程/HTTP 双检 + 僵死重连换域名同步订阅 + 翻动冷却）"
 }
-
+fi
 # ── iptables 持久化（三层兜底 + 自建恢复 unit，防重启后端口跳跃/防探测规则丢失） ──
 # 背景（2026-08-25 审计）：旧实现第三层 iptables-save 只写文件、无开机加载，重启后 ACVPN_* 链丢失。
 # 现做两层保障：
 #   1) 优先用 netfilter-persistent 存储（Debian iptables-persistent，开机由 network-pre.target 自动恢复）
 #   2) 否则写 /etc/iptables/rules.v4|v6 并注册 vpnplus-netfilter-restore.service（network-pre.target 前恢复）
+if ! declare -F persist_firewall >/dev/null 2>&1; then
 persist_firewall() {
     if $DRY_RUN; then info "[dry-run] 持久化 iptables 规则"; return 0; fi
     local saved=false
@@ -717,8 +734,9 @@ UNIT
     $saved || warn "防火墙规则未能持久化（重启后需重新配置）"
     return 0
 }
-
+fi
 # ── 日志轮转（防 vpnplus 长期运行日志无限膨胀） ──
+if ! declare -F setup_logrotate >/dev/null 2>&1; then
 setup_logrotate() {
     if $DRY_RUN; then info "[dry-run] 安装 /etc/logrotate.d/vpnplus（轮转 vpnplus 各类日志）"; return 0; fi
     cat > /etc/logrotate.d/vpnplus <<'ROT'
@@ -744,8 +762,9 @@ ROT
         || warn "logrotate 配置已写，但语法校验未通过或 logrotate 未安装（日志将不轮转）"
     return 0
 }
-
+fi
 # ── 订阅 HTTP 服务保障（busybox httpd；精确按端口定位，绝不杀全局 busybox） ──
+if ! declare -F ensure_sub_httpd >/dev/null 2>&1; then
 ensure_sub_httpd() {
     local port
     port=$(get_sub_port 2>/dev/null)
@@ -773,8 +792,9 @@ ensure_sub_httpd() {
         ss -tln 2>/dev/null | grep -q ":$port" && ok "订阅 HTTP 服务已启动" || warn "订阅 HTTP 服务启动失败，请手动检查"
     fi
 }
-
+fi
 # ── 订阅后处理：修复 sb 生成的 mport 重复（双 DNAT 导致 40000-42000,40000-42000） ──
+if ! declare -F fix_mport_dup >/dev/null 2>&1; then
 fix_mport_dup() {
     # sb 的 hy2 mport 来源是: iptables -t nat -nL | grep hy2_port | awk '{print $8}'
     # 若 PREROUTING 残留 + ACVPN_PORTHOP 各有一条 DNAT，sb 会拼成 "40000-42000,40000-42000"。
@@ -832,8 +852,9 @@ PY
         ok "订阅 mport 重复已修复（去重后同步 websbox）"
     fi
 }
-
+fi
 # ── 最终显示订阅链接 ──
+if ! declare -F show_subscription >/dev/null 2>&1; then
 show_subscription() {
     local sub_port token public_ip
     sub_port=$(get_sub_port 2>/dev/null || true)
@@ -861,9 +882,10 @@ show_subscription() {
     warn "订阅链接使用 HTTP + IP:端口；移动网络可能拦截高端口，必要时改用 Argo/HTTPS 入口。"
     return 0
 }
-
+fi
 # ── 防主动探测（独立命名链；重跑/卸载只动 ACVPN_ANTIPROBE，绝不 delete 全局 INPUT 规则） ──
 CHAIN_ANTIPROBE="ACVPN_ANTIPROBE"
+if ! declare -F apply_antiprobe >/dev/null 2>&1; then
 apply_antiprobe() {
     [ -f /etc/s-box/sb.json ] || { warn "sb.json 不存在，跳过防主动探测"; return 1; }
     info "配置防主动探测（独立链 $CHAIN_ANTIPROBE）..."
@@ -945,7 +967,7 @@ apply_antiprobe() {
     persist_firewall
     ok "防主动探测已启用: ${#TCP_PORTS[@]} TCP + ${#UDP_PORTS[@]} UDP + SSH + 单IP连接数上限 + IPv6对称（独立链 $CHAIN_ANTIPROBE）"
 }
-
+fi
 # ══════════ 主流程 ══════════
 main() {
     logo() { :; }
@@ -977,7 +999,8 @@ main() {
     # sb 菜单结构指纹：先抓一次 sb 主菜单横幅，确认菜单结构与脚本投喂序列预期一致
     # 若 sb 已存在的版本与锁定的 SB_COMMIT 不符（比如用户手动升级过），菜单序号可能漂移，
     # 静默继续会让安装"产物缺失才报错"很难排查。这里先探测，命中预期则继续，未命中则明确警告。
-    assert_sb_menu() {
+    if ! declare -F assert_sb_menu >/dev/null 2>&1; then
+assert_sb_menu() {
         [ -x /usr/bin/sb ] || return 0
         local banner
         banner=$(printf '0\n0\n' | timeout 10 bash /usr/bin/sb 2>&1 | sed -E 's/\x1B\[[0-9;]*[mK]//g' || true)
@@ -996,6 +1019,7 @@ main() {
         manifest "sb banner probe ver=${ver:-none}"
         return 0
     }
+fi
     if [ -f /etc/.vpnplus-singbox ]; then :; else assert_sb_menu; fi
 
     # 时间校准必须在安装前完成（否则 Reality/VMess 握手 bad timestamp）

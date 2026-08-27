@@ -228,6 +228,7 @@ PUBLIC_IP=$(curl -fsSL --max-time 5 https://api.ipify.org 2>/dev/null) \
 # 关键安全点：SHA256 校验【强制】。下载地址优先：
 #   1) 若 VERSION_PIN 指定 → 精确拼接该 tag 的下载 URL（无 API 不确定性）
 #   2) 否则 → API 取最新 max tag，并同样强制 SHA256 校验
+if ! declare -F install_bbrv3 >/dev/null 2>&1; then
 install_bbrv3() {
     if echo "$CUR_KERNEL" | grep -q "bbrv3"; then
         local cur_ver latest_tag latest_ver
@@ -316,8 +317,9 @@ install_bbrv3() {
     rm -f /tmp/bbrv3.deb
     ok "BBRv3 已安装（重启后生效）"
 }
-
+fi
 # ── 网络优化（保持 ACVPN 的三级内存分级 + ethtool 尽力降级） ──
+if ! declare -F apply_sysctl >/dev/null 2>&1; then
 apply_sysctl() {
     info "应用网络暴力优化..."
     local mem_kb mem_mb RMEM TCPMEM CONNTRACK_MAX CONNTRACK_HASH
@@ -394,7 +396,8 @@ SYS"
     manifest "conntrack max=$CONNTRACK_MAX hash=$CONNTRACK_HASH"
     ok "网络参数已写入 $conf 并应用（conntrack=$CONNTRACK_MAX，按内存分级防 OOM）"
 }
-
+fi
+if ! declare -F apply_ethtool >/dev/null 2>&1; then
 apply_ethtool() {
     command -v ethtool >/dev/null 2>&1 || { info "ethtool 未安装，跳过网卡深度优化"; return 0; }
     local iface
@@ -410,7 +413,8 @@ apply_ethtool() {
     run ethtool -C "$iface" rx-usecs 16 tx-usecs 16 || true
     ok "ethtool 深度优化完成（不支持的项已自动跳过）"
 }
-
+fi
+if ! declare -F apply_qdisc >/dev/null 2>&1; then
 apply_qdisc() {
     local iface
     iface=$(ip route 2>/dev/null | awk '/default/ {print $5; exit}' || true)
@@ -424,7 +428,8 @@ apply_qdisc() {
     fi
     ok "fq 队列调度已应用到 $iface"
 }
-
+fi
+if ! declare -F boost_limits >/dev/null 2>&1; then
 boost_limits() {
     run bash -c "cat > /etc/security/limits.d/99-vpnplus.conf <<'LIMITS'
 * soft nofile 1048576
@@ -438,7 +443,8 @@ root hard nproc 655360
 LIMITS"
     ok "资源限制已提升"
 }
-
+fi
+if ! declare -F apply_rss >/dev/null 2>&1; then
 apply_rss() {
     # 多队列网络调优：所有 RX/TX 队列的 RPS/XPS + ethtool + fq 持久化。
     run bash -c "cat > /usr/local/sbin/vpnplus-net-tuning.sh <<'TUNE'
@@ -503,8 +509,9 @@ UNIT"
     fi
     ok "多队列 RPS/XPS、ethtool、fq 已配置并持久化 (vpnplus-net-tuning.service)"
 }
-
+fi
 # ── GRUB 默认内核校验（防重启后进旧内核） ──
+if ! declare -F ensure_grub_boot >/dev/null 2>&1; then
 ensure_grub_boot() {
     [ -f /boot/grub/grub.cfg ] || { warn "未找到 /boot/grub/grub.cfg，跳过默认内核校验"; return 1; }
     local entries=() target=-1 idx=0 e gd
@@ -532,7 +539,7 @@ ensure_grub_boot() {
         info "GRUB_DEFAULT=$gd，BBRv3 位于 index $target；若重启未进新内核请手动改"
     fi
 }
-
+fi
 # ══════════ 主流程 ══════════
 if $DRY_RUN; then echo -e "${YELLOW}═══ DRY-RUN 模式：仅预览，不修改系统 ═══${N}"; fi
 logo() { :; }
