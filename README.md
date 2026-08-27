@@ -136,13 +136,15 @@ SERVER_IP="你的服务器IP" bash verify.sh
 
 检查内容包括：
 
+- **时间同步**：`chrony Leap Normal` / `System clock synchronized` / `ntpdate` 偏移（P0，Reality/VMess 对时）
 - sing-box 是否安装和运行
 - BBRv3 是否存在
 - fq 和网卡优化状态
 - 持久化网络调优服务
 - TCP/UDP 端口监听
-- 端口跳跃链
+- 端口跳跃链（含 `DNAT 指向` 是否对准当前 TUIC 端口）
 - **PREROUTING 是否有残留过期端口跳跃段**（防止 hy2/tuic 端口跳跃握手无响应）
+- **TUIC 单点污染**：`40254` 已知污染端口黄灯 + `127.0.0.1 TUIC 回环 204` 自检（区分本机坏 vs 外网墙）
 - 防主动探测链
 - VMess 明文端口锁定（默认 off，开启时才会检查）
 - Argo 隧道（HTTP 4xx 视为可达，仅超时才报不可达，避免误报）
@@ -189,9 +191,20 @@ rm -f /etc/.vpnplus-singbox && bash deploy_singbox.sh
 脚本已处理重跑稳定性的几个坑：
 
 - **不会卡死**：sb 菜单投喂有 timeout + 结束清理残留进程兜底
-- **订阅端口保持不变**：重跑复用已有订阅端口，客户端订阅地址长期有效
+- **订阅端口保持不变**：重跑复用已有订阅端口，客户端订阅地址长期有效（`RESET_SUB=1` 强制轮转除外）
 - **幂等清理跳跃段 NAT 残留**：重跑前自动清掉过期端口跳跃规则，不影响 hy2/tuic
+- **时间自动对准**：首次部署即装 `chrony` 国内源（阿里云/cn.pool），`verify.sh` 会验 `Leap Normal`，杜绝 `bad timestamp` 全不通
 - **重复跑安全**：BBRv3 等系统优化幂等，已生效自动跳过
+
+### 订阅暴露后一键轮转
+
+默认重跑会**复用**旧订阅（`http://IP:port/token` 不变）。若链接暴露想换新：
+
+```bash
+RESET_SUB=1 bash deploy_singbox.sh
+# 或 bash deploy_singbox.sh --reset-sub
+```
+旧链接立即 `404`，新订阅 `clmi.yaml/tuic5.txt` 已切到新 `token/端口`，TUIC 当前为 `54321`（`40254` 已知易被限速，`verify.sh` 会黄灯提醒）
 
 ---
 
