@@ -158,6 +158,30 @@ else
     info "VMESS_LOCK=off：跳过明文 VMess 公网封锁检查"
 fi
 
+# 3c. 三处对齐（sb.json vs clmi.yaml vs iptables）— 捕获 rn1 40254/54321 岔裂
+# 自动化比对：sb.json 的每个 inbound 端口 是否等于 clmi.yaml 同名 proxy 的 port，且跳跃 DNAT 是否指向它
+if [ -f /etc/s-box/sb.json ] && [ -f /etc/s-box/clmi.yaml ]; then
+    echo "--- 三处对齐 ---"
+    _align_ok=true
+    while IFS='|' read -r _sb_port _sb_type; do
+        [ -z "$_sb_port" ] || [ "$_sb_port" = "null" ] && continue
+        # 跳过 vmess-argo 等 clmi 中 server 为 cloudflare 的项，只比直连
+        _clmi_port=$(grep -A2 "type: $_sb_type" /etc/s-box/clmi.yaml 2>/dev/null | grep -oE 'port: [0-9]+' | head -1 | grep -oE '[0-9]+' || true)
+        # 若 sb.json 某类型在 clmi 找不到（比如 argo），跳过
+        [ -z "$_clmi_port" ] && continue
+        if [ "$_sb_port" != "$_clmi_port" ]; then
+            warn "三处岔裂: sb.json $_sb_type $_sb_port ≠ clmi.yaml $_clmi_port（订阅与监听不一致，客户端按订阅连会不通）"
+            _align_ok=false
+        fi
+    done < <(jq -r '.inbounds[] | "\(.listen_port)|\(.type)"' /etc/s-box/sb.json 2>/dev/null || true)
+    $_align_ok && { ok "sb.json 与 clmi.yaml 端口一致"; PASS=$((PASS + 1)); }
+    # 额外：若 sb.json TUIC 已是 54321 但 iptables 仍指 40254，也算岔裂（上次 rn1 就是）
+    _tu_now=$(jq -r '.inbounds[] | select(.type=="tuic") | .listen_port' /etc/s-box/sb.json 2>/dev/null || true)
+    if [ -n "$_tu_now" ] && [ "$_tu_now" != "null" ] && ! iptables -t nat -L "$CHAIN_PORTHOP" -n 2>/dev/null | grep -q "to::${_tu_now}"; then
+        warn "三处岔裂: iptables 跳跃未指向当前 TUIC $_tu_now（$CHAIN_PORTHOP 需 DNAT 43000:45000→:$_tu_now）"
+    fi
+fi
+
 # 4. Argo
 echo "--- Argo 隧道 ---"
 if [ -f /etc/s-box/argo.log ]; then

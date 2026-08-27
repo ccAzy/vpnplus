@@ -61,16 +61,19 @@ fi
 DRY_RUN=false
 VMESS_LOCK="${VMESS_LOCK:-off}"     # 用户明确不需要防火墙：vmess 明文端口公网直连（不再锁回环）
 RESET_SUB="${RESET_SUB:-0}"         # RESET_SUB=1 强制轮转订阅 token/端口（暴露后一键换链）
+FORCE=false
 for arg in "$@"; do
     case "$arg" in
         --dry-run) DRY_RUN=true ;;
         --reset-sub) RESET_SUB=1 ;;
+        --force) FORCE=true ;;
         --help|-h) cat <<'HELP'
 vpnplus deploy_singbox.sh — sing-box 一键部署
-用法: bash deploy_singbox.sh [--dry-run] [--reset-sub]
+用法: bash deploy_singbox.sh [--dry-run] [--reset-sub] [--force]
   --dry-run  只打印将执行的动作，不实际修改系统
   --reset-sub 强制轮转订阅（删除旧 subport/subtoken，生成全新 token/端口）
              等价 RESET_SUB=1 bash deploy_singbox.sh，暴露后一键换链
+  --force    强制重跑全流程（忽略 /etc/.vpnplus-singbox 已部署标记，强制对齐 sb.json/iptables/订阅三处）
   VMESS_LOCK=on|off  明文 VMess 端口是否封锁公网（默认 off：直连，仅密钥登录无防火墙场景）
   RESET_SUB=1        同 --reset-sub
 HELP
@@ -989,11 +992,12 @@ main() {
     }
     trap 'trap_interrupt' EXIT
 
-    if [ -f "$CHECKPOINT" ] && [ -f /etc/s-box/sb.json ] && { systemctl is-active sb >/dev/null 2>&1 || systemctl is-active sing-box >/dev/null 2>&1 || systemctl is-active xr >/dev/null 2>&1; }; then
+    if [ "$FORCE" != "true" ] && [ -f "$CHECKPOINT" ] && [ -f /etc/s-box/sb.json ] && { systemctl is-active sb >/dev/null 2>&1 || systemctl is-active sing-box >/dev/null 2>&1 || systemctl is-active xr >/dev/null 2>&1; }; then
         # 已部署跳过≠失败，撤销 EXIT trap 避免误报“部署中断（退出码 0）”
         trap - EXIT
-        ok "sing-box 已部署运行中，跳过安装"; info "强制重装: rm -f $CHECKPOINT && bash deploy_singbox.sh"; return 0
+        ok "sing-box 已部署运行中，跳过安装（--force 可强制重跑对齐 sb.json/iptables/订阅三处）"; info "强制重装: rm -f $CHECKPOINT && bash deploy_singbox.sh  或  bash deploy_singbox.sh --force"; return 0
     fi
+    if [ "$FORCE" = "true" ]; then info "--force 已启用，将强制重跑全流程并对齐三处配置"; rm -f "$CHECKPOINT" 2>/dev/null || true; fi
 
     check_env || return 1
     # sb 菜单结构指纹：先抓一次 sb 主菜单横幅，确认菜单结构与脚本投喂序列预期一致
