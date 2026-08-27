@@ -435,6 +435,27 @@ EOSUB
     else warn "分流配置可能未完全生效，可稍后手动 sb → 5 检查"; fi
 }
 fi
+
+if ! declare -F force_ipv4_lock >/dev/null 2>&1; then
+force_ipv4_lock() {
+    info "锁定 IPv4（直连/WARP 强制 ipv4_only，压延迟）..."
+    if [ ! -f /etc/s-box/sb.json ]; then warn "sb.json 不存在，跳过 IPv4 锁定"; return 0; fi
+    if $DRY_RUN; then info "[dry-run] 将把 sb.json 的 prefer_ipv4 → ipv4_only 并重载"; return 0; fi
+    local changed=false
+    if grep -q prefer_ipv4 /etc/s-box/sb.json 2>/dev/null; then
+        cp /etc/s-box/sb.json /etc/s-box/sb.json.bak.ipv4 2>/dev/null || true
+        jq '(.route.rules[] | select(.strategy=="prefer_ipv4") | .strategy) = "ipv4_only"' /etc/s-box/sb.json > /tmp/sb.json.tmp 2>/dev/null && cat /tmp/sb.json.tmp > /etc/s-box/sb.json && rm -f /tmp/sb.json.tmp && changed=true
+        ok "route 策略已切 ipv4_only"
+    fi
+    # outbounds 强制 ipv4_only（direct/socks 两种）
+    if jq -e '.outbounds[] | select(.domain_strategy)' /etc/s-box/sb.json >/dev/null 2>&1; then
+        jq '(.outbounds[] | select(.type=="direct" or .type=="socks") | .domain_strategy) = "ipv4_only"' /etc/s-box/sb.json > /tmp/sb.json.tmp 2>/dev/null && cat /tmp/sb.json.tmp > /etc/s-box/sb.json && rm -f /tmp/sb.json.tmp && changed=true
+    else
+        jq '.outbounds |= map(if .type=="direct" or .type=="socks" then .domain_strategy="ipv4_only" else . end)' /etc/s-box/sb.json > /tmp/sb.json.tmp 2>/dev/null && cat /tmp/sb.json.tmp > /etc/s-box/sb.json && rm -f /tmp/sb.json.tmp && changed=true
+    fi
+    if $changed; then systemctl try-restart sing-box 2>/dev/null || systemctl restart sing-box 2>/dev/null || true; sleep 2; ok "IPv4 锁定完成，已重载 sing-box"; else info "已是 ipv4_only，无需变更"; fi
+}
+fi
 # ── Argo 隧道 ──
 if ! declare -F start_argo >/dev/null 2>&1; then
 start_argo() {
@@ -1060,6 +1081,7 @@ fi
     step "6" "WARP + 域名分流（可选）"
     setup_warp
     setup_domain_routing
+    force_ipv4_lock || true
     fix_mport_dup || true
     show_subscription || true
 
