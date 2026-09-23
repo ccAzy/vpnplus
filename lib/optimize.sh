@@ -365,8 +365,9 @@ ensure_grub_boot() {
     }
     # 用「子菜单>条目」的完整路径定位 BBRv3，而不是数字索引。
     # 为什么：grub.cfg 顶层既有 menuentry 也有 submenu，只数 menuentry 会把索引算错——
-    # 2026-09-23 实测：脚本算出 index 1，而真实 index 1 是 "Advanced options for Ubuntu"
-    # 子菜单（BBRv3 实际在子菜单第 0 项）。那次侬幸进对了，但装了新内核后子菜单第 0 项
+    # 2026-09-23 实测：脚本算出 index 1，而真实 index 1 是「Advanced options for <发行版>」
+    # 子菜单（BBRv3 实际在子菜单第 0 项）——Ubuntu 与 Debian 的标题不同，但本函数是从 grub.cfg
+    # 现读标题的，两个发行版都能解析。那次侬幸进对了，但装了新内核后子菜单第 0 项
     # 会变成新内核 → 引导到错内核。用标题路径则不受索引漂移影响（GRUB 手册：submenu>entry）。
     local path gd
     path=$(awk -F"'" '
