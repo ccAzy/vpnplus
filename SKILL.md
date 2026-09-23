@@ -10,7 +10,7 @@ description: >
 ## 文件总览
 
 | 文件 | 用途 |
-|------|------|
+| ------ | ------ |
 | `SKILL.md` | 本文件 — 完整部署指南 |
 | `bootstrap.sh` | **部署前置** — 基础依赖安装与环境检查（不改防火墙/不重启） |
 | `deploy_optimize.sh` | **第1步** — BBRv3 安装 + TCP/UDP + ethtool + 动态 RPS/XPS/fq + 自动重启 |
@@ -60,6 +60,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/ccAzy/vpnplus/main/deploy_op
 ```
 
 自动完成：
+
 1. 清理旧 sing-box 残留（保留已部署的 /etc/s-box）
 2. 安装 BBRv3 内核（校验和尽力而为：上游有就比对，缺失只告警）
 3. 应用网络优化（TCP/UDP 缓冲、BBR/fq、所有 RX/TX 队列的 RPS/XPS、ethtool，按内存分级防 OOM）
@@ -68,6 +69,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/ccAzy/vpnplus/main/deploy_op
 6. 10 秒后自动重启（`--no-reboot` 可跳过）
 
 > 参数：
+>
 > - `--no-reboot` 跳过自动重启
 > - `--dry-run` 预览不执行
 > - `VERSION_PIN=x.y.z` 锁定 BBRv3 版本
@@ -79,6 +81,7 @@ curl -fsSL https://raw.githubusercontent.com/ccAzy/vpnplus/main/deploy_singbox.s
 ```
 
 自动完成：
+
 1. 安装 sing-box-yg 管理脚本（**锁定 commit + SHA256 校验**，重跑亦复审哈希）
 2. 配置订阅链接（Clash / Sbox / 通用聚合）
 3. 配置 Hysteria2 端口跳跃（40000-42000）+ Tuic 端口跳跃（43000-45000）→ 独立链 `ACVPN_PORTHOP`
@@ -92,6 +95,7 @@ curl -fsSL https://raw.githubusercontent.com/ccAzy/vpnplus/main/deploy_singbox.s
 ```bash
 reboot
 ```
+
 重启后等待 1-2 分钟，重新测试协议。
 
 ## 部署前清理旧安装
@@ -115,13 +119,14 @@ bash verify.sh
 ## 部署清单（审计日志）
 
 每次部署的关键动作记录到：
+
 - `/var/log/vpnplus-optimize-manifest.log`（内核来源/版本/SHA256）
 - `/var/log/vpnplus-singbox-manifest.log`（sb.sh commit/SHA256、部署结果、VMESS_LOCK 值）
 
 ## 管道命令速查
 
 | 步骤 | 命令 | 校验 |
-|------|------|------|
+| ------ | ------ | ------ |
 | 清理 | `bash cleanup.sh --force` | `[ ! -d /etc/s-box ]` |
 | 第1步 | `bash deploy_optimize.sh` | 重启后 `uname -r` 含 `bbrv3` |
 | 第2步 | `curl .../deploy_singbox.sh \| bash` | `which sb && [ -d /etc/s-box ]` |
