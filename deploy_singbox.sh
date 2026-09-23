@@ -16,7 +16,7 @@ set -euo pipefail
 
 # ── lib 加载（保持一键裸装兼容：lib 存在则 source，否则用内联兜底） ──
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-for _lib in common time firewall singbox subscription argo warp; do
+for _lib in common time firewall hardening singbox subscription argo warp; do
     if [ -f "$SCRIPT_DIR/lib/${_lib}.sh" ]; then
         source "$SCRIPT_DIR/lib/${_lib}.sh" 2>/dev/null || true
     elif [ -f "lib/${_lib}.sh" ]; then
@@ -27,15 +27,17 @@ for _lib in common time firewall singbox subscription argo warp; do
 done
 
 # ── 可调常量（集中管理，避免端口段/限速值散落各处） ──
-readonly HOP_HY_RANGE="40000:42000" # Hysteria2 端口跳跃段
-readonly HOP_TU_RANGE="43000:45000" # Tuic5 端口跳跃段
-readonly RATE_SYN_ABOVE=50
-readonly RATE_SYN_BURST=100 # TCP 代理端口 SYN 限速 /sec、burst
-readonly RATE_UDP_ABOVE=200
-readonly RATE_UDP_BURST=400 # UDP 端口/跳跃段 限速 /sec、burst
-readonly CONN_ABOVE=200     # 单 IP 单端口新建连接上限
-readonly SSH_RATE_ABOVE=3
-readonly SSH_RATE_BURST=5 # SSH 爆破防御 3/min、burst
+# 以 lib/firewall.sh 为准源：lib 已加载时沿用其 readonly 定义，避免重复 readonly 报错；
+# 裸脚本直跑（无 lib 目录）时才回退为本地默认值
+[ -n "${HOP_HY_RANGE+x}" ] || readonly HOP_HY_RANGE="40000:42000" # Hysteria2 端口跳跃段
+[ -n "${HOP_TU_RANGE+x}" ] || readonly HOP_TU_RANGE="43000:45000" # Tuic5 端口跳跃段
+[ -n "${RATE_SYN_ABOVE+x}" ] || readonly RATE_SYN_ABOVE=50
+[ -n "${RATE_SYN_BURST+x}" ] || readonly RATE_SYN_BURST=100 # TCP 代理端口 SYN 限速 /sec、burst
+[ -n "${RATE_UDP_ABOVE+x}" ] || readonly RATE_UDP_ABOVE=200
+[ -n "${RATE_UDP_BURST+x}" ] || readonly RATE_UDP_BURST=400 # UDP 端口/跳跃段 限速 /sec、burst
+[ -n "${CONN_ABOVE+x}" ] || readonly CONN_ABOVE=200     # 单 IP 单端口新建连接上限
+[ -n "${SSH_RATE_ABOVE+x}" ] || readonly SSH_RATE_ABOVE=3
+[ -n "${SSH_RATE_BURST+x}" ] || readonly SSH_RATE_BURST=5 # SSH 爆破防御 3/min、burst
 readonly SB_PATCH_MARKER="/etc/s-box/.sb-argo-patched.sha256"
 
 # ── sb 菜单安全投喂：一次性喂完按键，timeout 限定，结束后强杀残留 sb 交互防孤儿 ──
@@ -1012,7 +1014,8 @@ if ! declare -F fix_mport_dup >/dev/null 2>&1; then
     fix_mport_dup() {
         # sb 的 hy2 mport 来源是: iptables -t nat -nL | grep hy2_port | awk '{print $8}'
         # 若 PREROUTING 残留 + ACVPN_PORTHOP 各有一条 DNAT，sb 会拼成 "40000-42000,40000-42000"。
-        # 这里做幂等去重：对 hy2.txt / jhsub.txt / websbox 副本的 mport= 去重逗号段。
+        # 这里做幂等去重：对 hy2.txt / jhsub.txt / websbox 副本的 mport= 去重逗号段，
+        # 对 clmi.yaml / tuic5.txt 另去重 `ports: A,A` 与 `&mport=A&mport=A` 重复段。
         local changed=false f
         for f in /etc/s-box/hy2.txt /etc/s-box/jhsub.txt; do
             [ -f "$f" ] || continue
@@ -1051,6 +1054,23 @@ PY
                 fi
             fi
         done
+        # clmi.yaml 用 `ports: X-Y` 而非 mport=（同源逻辑见 vpnmax vendor/sb.sh
+        # vpnmax_fix_clmi_mport_dup；vpnplus 无 vendor 目录，内聚到此）。
+        # 去重 "ports: A,A" 与 "&mport=A&mport=A" 类重复段；Debian/Ubuntu 通用（GNU sed -E，循环上限 5 轮）。
+        local _cf _n
+        for _cf in /etc/s-box/clmi.yaml /etc/s-box/tuic5.txt /etc/s-box/hy2.txt /etc/s-box/jhsub.txt; do
+            [ -f "$_cf" ] || continue
+            _n=0
+            while grep -qE 'ports: ([0-9]+-[0-9]+),\1' "$_cf" 2>/dev/null && [ "$_n" -lt 5 ]; do
+                sed -i -E 's/ports: ([0-9]+-[0-9]+),\1/ports: \1/' "$_cf" 2>/dev/null && changed=true
+                _n=$((_n+1))
+            done
+            _n=0
+            while grep -qE 'mport=[0-9]+-[0-9]+&mport=' "$_cf" 2>/dev/null && [ "$_n" -lt 5 ]; do
+                sed -i -E 's/(mport=[0-9]+-[0-9]+)(&\1)+/\1/g' "$_cf" 2>/dev/null && changed=true
+                _n=$((_n+1))
+            done
+        done
         if [ "$changed" = true ]; then
             # 同步 websbox 目录（busybox httpd 根）
             if [ -f /etc/s-box/subtoken.log ] && [ -d /root/websbox ]; then
@@ -1059,6 +1079,7 @@ PY
                 [ -n "$tok" ] && [ -d "/root/websbox/$tok" ] && {
                     cp -f /etc/s-box/jhsub.txt "/root/websbox/$tok/jhsub.txt" 2>/dev/null || true
                     cp -f /etc/s-box/hy2.txt "/root/websbox/$tok/hy2.txt" 2>/dev/null || true
+                    [ -f /etc/s-box/clmi.yaml ] && cp -f /etc/s-box/clmi.yaml "/root/websbox/$tok/clmi.yaml" 2>/dev/null || true
                     # 兼容旧 token 目录落在根下的情况
                     cp -f /etc/s-box/jhsub.txt /root/websbox/jhsub.txt 2>/dev/null || true
                 } || true

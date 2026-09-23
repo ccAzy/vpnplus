@@ -3,6 +3,50 @@
 [ -n "${VPNPLUS_OPTIMIZE_LOADED:-}" ] && return 0
 VPNPLUS_OPTIMIZE_LOADED=1
 
+# 原子 sysctl 补丁：整文件重写经 atomic_write 落盘（幂等可重入，并发/中断不留半文件）。
+# 用法: vpnplus_sysctl_set <conf> <key> <value>  — key 不存在则追加，存在则整行替换。
+if ! declare -F vpnplus_sysctl_set >/dev/null 2>&1; then
+vpnplus_sysctl_set() {
+    local conf="$1" key="$2" val="$3" tmp
+    local esc_key esc_val
+    esc_key=$(printf '%s' "$key" | sed 's/[][^$.*\\]/\\&/g')
+    esc_val=$(printf '%s' "$val" | sed 's/[&\\]/\\&/g')
+    tmp=$(mktemp 2>/dev/null) || return 1
+    if [ -f "$conf" ]; then
+        sed "s|^${esc_key}[[:space:]]*=.*|${key} = ${esc_val}|" "$conf" >"$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
+        if ! grep -qE "^${esc_key}[[:space:]]*=" "$tmp" 2>/dev/null; then
+            printf '%s = %s\n' "$key" "$val" >>"$tmp"
+        fi
+    else
+        printf '%s = %s\n' "$key" "$val" >"$tmp"
+    fi
+    atomic_place "$tmp" "$conf" "bak"
+}
+fi
+
+# GRUB 文件备份+重载：备份到 $BAK_DIR（默认 /var/backups/vpnplus），优先 update-grub，回退 grub-mkconfig。
+# Debian/Ubuntu 双适配：两发行版均有 update-grub（Ubuntu 必备，Debian 装 grub-pc 即有），
+# 回退路径 grub-mkconfig -o /boot/grub/grub.cfg 两边一致可用。
+if ! declare -F vpnplus_grub_backup >/dev/null 2>&1; then
+vpnplus_grub_backup() {
+    local bakdir="${BAK_DIR:-/var/backups/vpnplus}/grub-$(date +%Y%m%d)"
+    run mkdir -p "$bakdir" 2>/dev/null || true
+    run cp -a /etc/default/grub "$bakdir/grub" 2>/dev/null || true
+}
+fi
+if ! declare -F vpnplus_grub_update >/dev/null 2>&1; then
+vpnplus_grub_update() {
+    if run update-grub 2>/dev/null; then
+        return 0
+    fi
+    warn "update-grub 不可用/失败，回退 grub-mkconfig -o /boot/grub/grub.cfg"
+    run grub-mkconfig -o /boot/grub/grub.cfg || {
+        warn "grub-mkconfig 亦失败，GRUB 更改仅在 /etc/default/grub，下次 update-grub 生效"
+        return 1
+    }
+}
+fi
+
 install_bbrv3() {
     if echo "$CUR_KERNEL" | grep -q "bbrv3"; then
         local cur_ver latest_tag latest_ver
@@ -133,10 +177,20 @@ install_bbrv3() {
         return 1
     fi
 
-    # grub 菜单可见（部分 VPS 默认 timeout=0）
-    if grep -q '^GRUB_TIMEOUT=0' /etc/default/grub 2>/dev/null; then
-        run sed -i 's/^GRUB_TIMEOUT=0/GRUB_TIMEOUT=10/g' /etc/default/grub
-        run update-grub || warn "update-grub 失败，GRUB 菜单可能未更新"
+    # grub 菜单可见（部分 VPS 默认 timeout=0；Ubuntu 默认 TIMEOUT_STYLE=hidden，timeout 再大也不显示菜单）
+    if grep -q '^GRUB_TIMEOUT=0' /etc/default/grub 2>/dev/null || grep -q '^GRUB_TIMEOUT_STYLE=hidden' /etc/default/grub 2>/dev/null; then
+        vpnplus_grub_backup || true
+        if grep -q '^GRUB_TIMEOUT=' /etc/default/grub 2>/dev/null; then
+            run sed -i 's/^GRUB_TIMEOUT=.*/GRUB_TIMEOUT=10/' /etc/default/grub
+        else
+            run bash -c 'printf "%s\n" "GRUB_TIMEOUT=10" >> /etc/default/grub'
+        fi
+        if grep -q '^GRUB_TIMEOUT_STYLE=' /etc/default/grub 2>/dev/null; then
+            run sed -i 's/^GRUB_TIMEOUT_STYLE=.*/GRUB_TIMEOUT_STYLE=menu/' /etc/default/grub
+        else
+            run bash -c 'printf "%s\n" "GRUB_TIMEOUT_STYLE=menu" >> /etc/default/grub'
+        fi
+        vpnplus_grub_update || warn "GRUB 菜单可能未更新（已备份，见 \$BAK_DIR/grub-*）"
     fi
     rm -f /tmp/bbrv3.deb
     ok "BBRv3 已安装（重启后生效）"
@@ -195,7 +249,7 @@ MODS
     fi
 
     local conf="/etc/sysctl.d/99-vpnplus-brutal.conf"
-    run bash -c "cat > '$conf' <<'SYS'
+    atomic_write "$conf" <<SYS
 # vpnplus 网络优化（按内存分级，防 OOM；tcp_mem 单位为内存页）
 net.core.default_qdisc = fq
 net.ipv4.tcp_congestion_control = bbr
@@ -230,7 +284,7 @@ net.ipv4.udp_rmem_min = 8192
 net.ipv4.udp_wmem_min = 8192
 net.core.busy_read = 50
 net.core.busy_poll = 50
-SYS"
+SYS
     if ! run sysctl --system; then
         warn "sysctl --system 执行失败，部分网络参数可能未生效"
     fi
@@ -280,7 +334,7 @@ apply_qdisc() {
 }
 
 boost_limits() {
-    run bash -c "cat > /etc/security/limits.d/99-vpnplus.conf <<'LIMITS'
+    atomic_write /etc/security/limits.d/99-vpnplus.conf <<'LIMITS'
 * soft nofile 1048576
 * hard nofile 1048576
 * soft nproc 655360
@@ -289,57 +343,58 @@ root soft nofile 1048576
 root hard nofile 1048576
 root soft nproc 655360
 root hard nproc 655360
-LIMITS"
+LIMITS
     ok "资源限制已提升"
 }
 
 apply_rss() {
     # 多队列网络调优：所有 RX/TX 队列的 RPS/XPS + ethtool + fq 持久化。
-    run bash -c "cat > /usr/local/sbin/vpnplus-net-tuning.sh <<'TUNE'
+    # 全原子写：脚本与 service 经 atomic_write 落盘（替代 run bash -c 包裹的裸 cat）。
+    atomic_write /usr/local/sbin/vpnplus-net-tuning.sh <<'TUNE'
 #!/bin/bash
 set -u
 
-iface=\$(ip route 2>/dev/null | awk '/default/ {print \$5; exit}')
-[ -n \"\$iface\" ] || { echo '[vpnplus-net-tuning] no default interface' >&2; exit 1; }
-[ -d \"/sys/class/net/\$iface\" ] || { echo \"[vpnplus-net-tuning] interface not found: \$iface\" >&2; exit 1; }
+iface=$(ip route 2>/dev/null | awk '/default/ {print $5; exit}')
+[ -n "$iface" ] || { echo '[vpnplus-net-tuning] no default interface' >&2; exit 1; }
+[ -d "/sys/class/net/$iface" ] || { echo "[vpnplus-net-tuning] interface not found: $iface" >&2; exit 1; }
 
-cores=\$(nproc 2>/dev/null || echo 1)
-if [ \"\$cores\" -ge 64 ]; then
+cores=$(nproc 2>/dev/null || echo 1)
+if [ "$cores" -ge 64 ]; then
     cpu_mask=ffffffffffffffff
 else
-    cpu_mask=\$(printf '%x' \$(( (1 << cores) - 1 )))
+    cpu_mask=$(printf '%x' $(( (1 << cores) - 1 )))
 fi
-rps_flow=\$((cores * 32768))
+rps_flow=$((cores * 32768))
 
 command -v ethtool >/dev/null 2>&1 && {
-    ethtool -G \"\$iface\" rx 4096 tx 4096 2>/dev/null || true
-    ethtool -K \"\$iface\" tx-checksumming on rx-checksumming on 2>/dev/null || true
-    ethtool -K \"\$iface\" tso on gso on gro on 2>/dev/null || true
-    ethtool -K \"\$iface\" tx-udp-segmentation on 2>/dev/null || true
-    ethtool -C \"\$iface\" adaptive-rx off adaptive-tx off 2>/dev/null || true
-    ethtool -C \"\$iface\" rx-usecs 16 tx-usecs 16 2>/dev/null || true
+    ethtool -G "$iface" rx 4096 tx 4096 2>/dev/null || true
+    ethtool -K "$iface" tx-checksumming on rx-checksumming on 2>/dev/null || true
+    ethtool -K "$iface" tso on gso on gro on 2>/dev/null || true
+    ethtool -K "$iface" tx-udp-segmentation on 2>/dev/null || true
+    ethtool -C "$iface" adaptive-rx off adaptive-tx off 2>/dev/null || true
+    ethtool -C "$iface" rx-usecs 16 tx-usecs 16 2>/dev/null || true
 }
 
 rx_count=0
-for queue in /sys/class/net/\$iface/queues/rx-*; do
-    [ -d \"\$queue\" ] || continue
-    printf '%s\\n' \"\$cpu_mask\" > \"\$queue/rps_cpus\" 2>/dev/null || true
-    printf '%s\\n' \"\$rps_flow\" > \"\$queue/rps_flow_cnt\" 2>/dev/null || true
-    rx_count=\$((rx_count + 1))
+for queue in /sys/class/net/$iface/queues/rx-*; do
+    [ -d "$queue" ] || continue
+    printf '%s\\n' "$cpu_mask" > "$queue/rps_cpus" 2>/dev/null || true
+    printf '%s\\n' "$rps_flow" > "$queue/rps_flow_cnt" 2>/dev/null || true
+    rx_count=$((rx_count + 1))
 done
-for queue in /sys/class/net/\$iface/queues/tx-*; do
-    [ -d \"\$queue\" ] || continue
-    printf '%s\\n' \"\$cpu_mask\" > \"\$queue/xps_cpus\" 2>/dev/null || true
+for queue in /sys/class/net/$iface/queues/tx-*; do
+    [ -d "$queue" ] || continue
+    printf '%s\\n' "$cpu_mask" > "$queue/xps_cpus" 2>/dev/null || true
 done
 
-tc qdisc replace dev \"\$iface\" root fq 2>/dev/null || true
-if [ \"\$rx_count\" -gt 0 ]; then
-    sysctl -w net.core.rps_sock_flow_entries=\$((rx_count * rps_flow)) >/dev/null 2>&1 || true
+tc qdisc replace dev "$iface" root fq 2>/dev/null || true
+if [ "$rx_count" -gt 0 ]; then
+    sysctl -w net.core.rps_sock_flow_entries=$((rx_count * rps_flow)) >/dev/null 2>&1 || true
 fi
-echo \"[vpnplus-net-tuning] applied iface=\$iface cores=\$cores rx_queues=\$rx_count mask=\$cpu_mask\"
+echo "[vpnplus-net-tuning] applied iface=$iface cores=$cores rx_queues=$rx_count mask=$cpu_mask"
 TUNE
-chmod +x /usr/local/sbin/vpnplus-net-tuning.sh
-cat > /etc/systemd/system/vpnplus-net-tuning.service <<'UNIT'
+    run chmod +x /usr/local/sbin/vpnplus-net-tuning.sh
+    atomic_write /etc/systemd/system/vpnplus-net-tuning.service <<'UNIT'
 [Unit]
 Description=vpnplus persistent network tuning
 After=network-online.target
@@ -350,7 +405,7 @@ RemainAfterExit=yes
 ExecStart=/usr/local/sbin/vpnplus-net-tuning.sh
 [Install]
 WantedBy=multi-user.target
-UNIT"
+UNIT
     run systemctl daemon-reload || true
     if ! run systemctl enable --now vpnplus-net-tuning.service; then
         warn "网络调优 systemd 服务启用失败，重启后可能不会自动恢复网卡参数"
@@ -392,9 +447,19 @@ ensure_grub_boot() {
     fi
 
     local _esc="${path//&/\\&}"
-    run sed -i "s|^GRUB_DEFAULT=.*|GRUB_DEFAULT=\"$_esc\"|" /etc/default/grub
-    if ! run update-grub; then
-        warn "update-grub 失败，GRUB 默认项可能未保存"
+    vpnplus_grub_backup || true
+    if grep -q '^GRUB_DEFAULT=' /etc/default/grub 2>/dev/null; then
+        run sed -i "s|^GRUB_DEFAULT=.*|GRUB_DEFAULT=\"$_esc\"|" /etc/default/grub
+    else
+        run bash -c "printf '%s\n' 'GRUB_DEFAULT=\"$_esc\"' >> /etc/default/grub"
+    fi
+    if ! command -v grub-script-check >/dev/null 2>&1 || grub-script-check /boot/grub/grub.cfg >/dev/null 2>&1; then
+        info "grub.cfg 语法检查通过（或无 grub-script-check，直接更新）"
+    else
+        warn "现 grub.cfg 语法异常，仍尝试更新（已备份，失败可回滚）"
+    fi
+    if ! vpnplus_grub_update; then
+        warn "GRUB 默认项可能未保存（已备份，见 \$BAK_DIR/grub-*）"
         return 1
     fi
     ok "GRUB 默认引导项已设为 BBRv3：$path"

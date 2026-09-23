@@ -60,7 +60,8 @@ EOSUB
 fix_mport_dup() {
     # sb 的 hy2 mport 来源是: iptables -t nat -nL | grep hy2_port | awk '{print $8}'
     # 若 PREROUTING 残留 + ACVPN_PORTHOP 各有一条 DNAT，sb 会拼成 "40000-42000,40000-42000"。
-    # 这里做幂等去重：对 hy2.txt / jhsub.txt / websbox 副本的 mport= 去重逗号段。
+    # 这里做幂等去重：对 hy2.txt / jhsub.txt / websbox 副本的 mport= 去重逗号段，
+    # 对 clmi.yaml / tuic5.txt 另去重 `ports: A,A` 与 `&mport=A&mport=A` 重复段。
     local changed=false f
     for f in /etc/s-box/hy2.txt /etc/s-box/jhsub.txt; do
         [ -f "$f" ] || continue
@@ -99,6 +100,23 @@ PY
             fi
         fi
     done
+    # clmi.yaml 用 `ports: X-Y` 而非 mport=（同源逻辑见 vpnmax vendor/sb.sh
+    # vpnmax_fix_clmi_mport_dup；vpnplus 无 vendor 目录，内聚到此）。
+    # 去重 "ports: A,A" 与 "&mport=A&mport=A" 类重复段；Debian/Ubuntu 通用（GNU sed -E，循环上限 5 轮）。
+    local _cf _n
+    for _cf in /etc/s-box/clmi.yaml /etc/s-box/tuic5.txt /etc/s-box/hy2.txt /etc/s-box/jhsub.txt; do
+        [ -f "$_cf" ] || continue
+        _n=0
+        while grep -qE 'ports: ([0-9]+-[0-9]+),\1' "$_cf" 2>/dev/null && [ "$_n" -lt 5 ]; do
+            sed -i -E 's/ports: ([0-9]+-[0-9]+),\1/ports: \1/' "$_cf" 2>/dev/null && changed=true
+            _n=$((_n+1))
+        done
+        _n=0
+        while grep -qE 'mport=[0-9]+-[0-9]+&mport=' "$_cf" 2>/dev/null && [ "$_n" -lt 5 ]; do
+            sed -i -E 's/(mport=[0-9]+-[0-9]+)(&\1)+/\1/g' "$_cf" 2>/dev/null && changed=true
+            _n=$((_n+1))
+        done
+    done
     if [ "$changed" = true ]; then
         # 同步 websbox 目录（busybox httpd 根）
         if [ -f /etc/s-box/subtoken.log ] && [ -d /root/websbox ]; then
@@ -107,6 +125,7 @@ PY
             [ -n "$tok" ] && [ -d "/root/websbox/$tok" ] && {
                 cp -f /etc/s-box/jhsub.txt "/root/websbox/$tok/jhsub.txt" 2>/dev/null || true
                 cp -f /etc/s-box/hy2.txt "/root/websbox/$tok/hy2.txt" 2>/dev/null || true
+                [ -f /etc/s-box/clmi.yaml ] && cp -f /etc/s-box/clmi.yaml "/root/websbox/$tok/clmi.yaml" 2>/dev/null || true
                 # 兼容旧 token 目录落在根下的情况
                 cp -f /etc/s-box/jhsub.txt /root/websbox/jhsub.txt 2>/dev/null || true
             } || true
@@ -119,7 +138,7 @@ PY
 
 setup_logrotate() {
     if $DRY_RUN; then info "[dry-run] 安装 /etc/logrotate.d/vpnplus（轮转 vpnplus 各类日志）"; return 0; fi
-    cat > /etc/logrotate.d/vpnplus <<'ROT'
+    atomic_write /etc/logrotate.d/vpnplus <<'ROT'
 /var/log/vpnplus-optimize.log
 /var/log/vpnplus-optimize-manifest.log
 /var/log/vpnplus-singbox-manifest.log

@@ -3,6 +3,29 @@
 [ -n "${VPNPLUS_ARGO_LOADED:-}" ] && return 0
 VPNPLUS_ARGO_LOADED=1
 
+# argo-extra.conf 白名单校验（对齐 vpnmax a28fe7e 系 P0-5 root RCE 防线）。
+# 规则：注释/# 与空行跳过；含 shell 元字符（;|&$``()<>!"'）整行丢弃并告警；
+# 仅放行 `--flag` 与 `[A-Za-z0-9.:=_/-]` 值 token。返回空格分隔的安全参数串。
+vpnplus_argo_extra_args() {
+    local extra="${1:-}" line tok ok_args=""
+    [ -s "$extra" ] || return 0
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in ''|'#'*) continue ;; esac
+        if printf '%s' "$line" | tr -d 'A-Za-z0-9 _.:=/-' | grep -q .; then
+            printf '[!]   argo-extra.conf 含 shell 元字符，整行丢弃：%.80s\n' "$line" >&2
+            continue
+        fi
+        for tok in $line; do
+            if printf '%s' "$tok" | grep -qE '^--[a-z-]+$|^[A-Za-z0-9.:=_/-]+$'; then
+                ok_args="$ok_args $tok"
+            else
+                printf '[!]   argo-extra.conf 非法 token，已丢弃：%.40s\n' "$tok" >&2
+            fi
+        done
+    done <"$extra"
+    printf '%s' "$ok_args"
+}
+
 start_argo() {
     [ -f /etc/s-box/sb.json ] || { warn "sb.json 不存在，跳过 Argo"; return 1; }
     info "通过 sb-yg 自动配置 Argo 临时隧道..."
@@ -38,6 +61,60 @@ EOSUB
 }
 
 
+
+# sb 菜单启动的隧道不读 argo-extra.conf（优选参数进不去）。
+# 部署后对齐一次：若 extra 非空且当前隧道命令行缺优选参数，则受控重启带上。
+# 幂等：已带参数则跳过；重启后只留单实例。
+ensure_argo_extra_applied() {
+    local extra="/etc/s-box/argo-extra.conf"
+    [ -s "$extra" ] || return 0
+    if ${DRY_RUN:-false}; then
+        info "[dry-run] 将对齐 argo-extra.conf 到运行隧道"
+        return 0
+    fi
+    local want_run cur_run
+    want_run=$(vpnplus_argo_extra_args "$extra" || true)
+    [ -z "$(echo "$want_run" | tr -d ' ')" ] && return 0
+    cur_run=$(pgrep -af 'cloudflared.*tunnel.*--url' 2>/dev/null | head -1 || true)
+    [ -z "$cur_run" ] && return 0
+    # 精确比对：extra 里的具体值（如 --edge-ip-version 4）必须出现在运行命令行里，
+    # 只含同名不同值（如 auto）也算缺失，避免 sb 默认 auto 蒙混过关。
+    local _missing=0 _need="" _tok _v
+    for _tok in --edge-ip-version --region --edge-bind-address; do
+        _v=$(echo "$want_run" | grep -oE -- "$_tok [^ ]+" | head -1 || true)
+        if [ -n "$_v" ] && ! echo "$cur_run" | grep -qF -- "$_v"; then
+            _missing=1
+            _need="$_need $_v"
+        fi
+    done
+    if [ "$_missing" = 0 ]; then
+        ok "运行隧道已带优选参数，无需对齐"
+        return 0
+    fi
+    info "运行隧道缺优选参数 ($_need)，受控重启一次带上..."
+    local wsport
+    wsport=$(jq -r '[.inbounds[] | select(.type=="vless" and .transport.type=="ws") | .listen_port][0] // empty' /etc/s-box/sb.json 2>/dev/null)
+    [ -n "$wsport" ] && [ "$wsport" != "null" ] || wsport=$(jq -r '.inbounds[1].listen_port // empty' /etc/s-box/sb.json 2>/dev/null)
+    [ -n "$wsport" ] || { warn "WS 端口解析失败，跳过对齐"; return 0; }
+    local cfbin
+    cfbin=$(command -v cloudflared 2>/dev/null)
+    [ -x "${cfbin:-}" ] || cfbin=$(ls /etc/s-box/cloudflared /usr/local/bin/cloudflared 2>/dev/null | head -1)
+    [ -x "${cfbin:-}" ] || { warn "cloudflared 缺失，跳过对齐"; return 0; }
+    pkill -9 -f 'cloudflared.*tunnel.*--url' 2>/dev/null || true
+    sleep 3
+    # 数组传参：want_run 已过白名单（仅 --flag 与安全值），杜绝无引号拼接注入
+    local -a want_arr=()
+    read -ra want_arr <<< "$want_run" || true
+    nohup "$cfbin" tunnel --url "http://localhost:$wsport" --no-autoupdate --protocol auto "${want_arr[@]}" >/etc/s-box/argo.log 2>&1 &
+    sleep 20
+    local cnt
+    cnt=$(pgrep -c -f 'cloudflared.*tunnel.*--url' 2>/dev/null || echo 0)
+    if [ "$cnt" -eq 1 ] && grep -ao 'https://[a-z0-9.-]*\.trycloudflare\.com' /etc/s-box/argo.log 2>/dev/null | tail -1 | grep -q .; then
+        ok "隧道已带优选参数重启（单实例，域名已更新，订阅由 keepalive L3 同步）"
+    else
+        warn "对齐后隧道异常（进程数 $cnt），keepalive 下轮自动修复"
+    fi
+}
 
 install_argo_keepalive() {
     if $DRY_RUN; then
@@ -80,10 +157,21 @@ tunnel_alive() { pgrep -f "$TUN_RUNS" >/dev/null 2>&1; }
 restart_tunnel() {
     pkill -9 -f "$TUN_RUNS" 2>/dev/null || true   # 只杀临时隧道，不误伤固定隧道/其他 cloudflared
     sleep 1
+    # G4修复：@reboot cron 与 keepalive 竞态会导致双进程；启动后只保留最新一个
     : > "$LOG"
+    # P0-5：extra 参数只取白名单 token（--flag 与安全值），元字符整行丢弃，不直接 cat 拼接
+    EXTRA_ARGS=$(grep -v '^#' /etc/s-box/argo-extra.conf 2>/dev/null | grep -oE -- '--[a-z-]+|[A-Za-z0-9.:=_/-]+' | tr '\n' ' ' || true)
+    # shellcheck disable=SC2086 # EXTRA_ARGS 已是白名单提取结果，无元字符
     nohup "$CF_BIN" tunnel --url "http://localhost:$WS_PORT" \
       --edge-ip-version auto --no-autoupdate --protocol auto \
-      $(cat /etc/s-box/argo-extra.conf 2>/dev/null) > "$LOG" 2>&1 &
+      $EXTRA_ARGS > "$LOG" 2>&1 &
+    sleep 2
+    pids=$(pgrep -f "$TUN_RUNS" 2>/dev/null || true)
+    if [ "$(echo "$pids" | wc -l)" -gt 1 ]; then
+        newest=$(echo "$pids" | tail -1)
+        for p in $pids; do [ "$p" != "$newest" ] || continue; kill -9 "$p" 2>/dev/null || true; done
+        logger -t vpnplus-argo "启动后发现多实例，已只保留最新 PID $newest（防 cron/keepalive 竞态）"
+    fi
 }
 
 refresh_sub() {
@@ -165,10 +253,31 @@ if [ "$HTTP" = "000" ]; then
 fi
 
 # L3: 隧道正常但订阅里还是旧域名(上次重连没同步成功) → 补同步
-if [ -n "$OLD_URL" ] && grep -q 'trycloudflare' /etc/s-box/jhsub.txt 2>/dev/null; then
-    if ! grep -q "$(echo "$OLD_URL" | sed 's|https://||')" /etc/s-box/jhsub.txt 2>/dev/null; then
+# G7修复：旧逻辑只看 jhsub.txt 且该文件可能根本不含域名（直接跳过）；
+# 现遍历全部 Argo 订阅产物，有域名残留但与运行域不一致即补同步，同步后复验，仍失败则明示手动。
+SUB_ARGO_FILES="/etc/s-box/jhsub.txt /etc/s-box/jhdy.txt /etc/s-box/clmi.yaml /etc/s-box/sbox.json /etc/s-box/vm_ws_argols.txt"
+if [ -n "$OLD_URL" ]; then
+    OLD_DOM=$(echo "$OLD_URL" | sed 's|https://||')
+    need_sync=0
+    for sf in $SUB_ARGO_FILES; do
+        if [ -f "$sf" ] && grep -q 'trycloudflare' "$sf" 2>/dev/null; then
+            grep -q "$OLD_DOM" "$sf" 2>/dev/null || need_sync=1
+        fi
+    done
+    if [ "$need_sync" = 1 ]; then
         refresh_sub
-        logger -t vpnplus-argo 'L3订阅与运行域名不一致, 已补同步'
+        sleep 3
+        still_old=0
+        for sf in $SUB_ARGO_FILES; do
+            if [ -f "$sf" ] && grep -q 'trycloudflare' "$sf" 2>/dev/null; then
+                grep -q "$OLD_DOM" "$sf" 2>/dev/null || still_old=1
+            fi
+        done
+        if [ "$still_old" = 1 ]; then
+            logger -t vpnplus-argo "L3补同步后订阅仍与运行域名 $OLD_DOM 不一致，sb 菜单可能已漂移，需手动: sb → 9 → 1"
+        else
+            logger -t vpnplus-argo "L3订阅与运行域名不一致, 已补同步"
+        fi
     fi
 fi
 exit 0

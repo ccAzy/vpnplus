@@ -191,6 +191,7 @@ bash deploy_singbox.sh --force
 # 等价 rm -f /etc/.vpnplus-singbox && bash deploy_singbox.sh
 # 裸装：bash <(curl -fsSL https://raw.githubusercontent.com/ccAzy/vpnplus/main/deploy_singbox.sh) --force
 ```
+
 旧写法 `rm -f /etc/.vpnplus-singbox && bash deploy_singbox.sh` 仍可用，`--force` 是同一逻辑的显式开关，会强制对齐 `sb.json/iptables/订阅` 三处（专治 `vi sb.json` 后被 `@reboot 9-1` 刷回来的岔裂）。
 
 脚本已处理重跑稳定性的几个坑：
@@ -209,6 +210,7 @@ bash deploy_singbox.sh --force
 RESET_SUB=1 bash deploy_singbox.sh
 # 或 bash deploy_singbox.sh --reset-sub
 ```
+
 旧链接立即 `404`，新订阅 `clmi.yaml/tuic5.txt` 已切到新 `token/端口`，TUIC 当前为 `54321`（`40254` 已知易被限速，`verify.sh` 会黄灯提醒）
 
 ## 项目结构（lib 化，低成本变更）
@@ -227,6 +229,7 @@ lib/warp.sh        # WARP + 分流
 lib/verify/        # verify 侧 time/tuic 回环 204
 build.sh           # 校验 lib→单文件漂移，生成 dist/ 供 raw 分发
 ```
+
 改 1 个端口/1 个协议只动 1 个 `lib/*.sh`，`bash build.sh` 校验漂移，`bash -n + shellcheck` 门禁。
 
 ---
