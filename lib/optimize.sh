@@ -22,6 +22,16 @@ install_bbrv3() {
         fi
     fi
 
+    # 已装好、只差重启：直接跳过下载。否则会白下 141MB（2026-09-23 实测约 3 分钟）。
+    local _installed_kernel="" _k
+    for _k in /boot/vmlinuz-*bbrv3*; do
+        [ -e "$_k" ] && { _installed_kernel="$_k"; break; }
+    done
+    if [ -n "$_installed_kernel" ]; then
+        ok "BBRv3 内核已安装（$_installed_kernel），只差重启生效 —— 跳过下载"
+        return 0
+    fi
+
     info "获取 BBRv3 内核..."
     local TAG="" DOWNLOAD_URL="" api_json
 
@@ -162,6 +172,13 @@ apply_sysctl() {
         fi
         run modprobe nf_conntrack || true
     fi
+    # 开机也要有 nf_conntrack：否则 /etc/sysctl.d 里那行 nf_conntrack_max 在 boot 时写不进去
+    # （2026-09-23 实测：重启后 /proc/sys/net/netfilter/nf_conntrack_max 不存在，130000 丢失）。
+    # systemd-sysctl.service 排在 systemd-modules-load.service 之后，所以这条能让它开机先生效。
+    atomic_write /etc/modules-load.d/vpnplus-conntrack.conf <<'MODS'
+# vpnplus：让 nf_conntrack 开机加载，保证 net.netfilter.nf_conntrack_max 能应用
+nf_conntrack
+MODS
     if [ -w /sys/module/nf_conntrack/parameters/hashsize ]; then
         if ! run bash -c "printf '%s\\n' '$CONNTRACK_HASH' > /sys/module/nf_conntrack/parameters/hashsize"; then
             warn "nf_conntrack hashsize 写入失败，连接跟踪仍使用内核默认桶数"
@@ -209,7 +226,14 @@ SYS"
         warn "sysctl --system 执行失败，部分网络参数可能未生效"
     fi
     manifest "conntrack max=$CONNTRACK_MAX hash=$CONNTRACK_HASH"
-    ok "网络参数已写入 $conf 并应用（conntrack=$CONNTRACK_MAX，按内存分级防 OOM）"
+    # 回读校验：conntrack 是「写了不等于生效」的典型——模块没加载时 sysctl 会静默失败
+    local _ck
+    _ck=$(sysctl -n net.netfilter.nf_conntrack_max 2>/dev/null || true)
+    if [ -n "$_ck" ] && [ "$_ck" = "$CONNTRACK_MAX" ]; then
+        ok "网络参数已写入 $conf 并应用（conntrack=$CONNTRACK_MAX，按内存分级防 OOM）"
+    else
+        warn "conntrack 未生效：期望 $CONNTRACK_MAX，实得 ${_ck:-读不到}（已写 /etc/modules-load.d/vpnplus-conntrack.conf，重启后应自动生效）"
+    fi
 }
 
 apply_ethtool() {
@@ -330,40 +354,42 @@ ensure_grub_boot() {
         warn "未找到 /boot/grub/grub.cfg，跳过默认内核校验"
         return 1
     }
-    local entries=() target=-1 idx=0 e gd
-    mapfile -t entries < <(grep -oP "menuentry '\K[^']+" /boot/grub/grub.cfg 2>/dev/null || true)
-    [ "${#entries[@]}" -eq 0 ] && {
-        warn "无法解析 grub.cfg 菜单项，跳过"
-        return 1
-    }
-    for e in "${entries[@]}"; do
-        if [[ "$e" == *bbrv3* ]]; then
-            target=$idx
-            break
+    # 用「子菜单>条目」的完整路径定位 BBRv3，而不是数字索引。
+    # 为什么：grub.cfg 顶层既有 menuentry 也有 submenu，只数 menuentry 会把索引算错——
+    # 2026-09-23 实测：脚本算出 index 1，而真实 index 1 是 "Advanced options for Ubuntu"
+    # 子菜单（BBRv3 实际在子菜单第 0 项）。那次侬幸进对了，但装了新内核后子菜单第 0 项
+    # 会变成新内核 → 引导到错内核。用标题路径则不受索引漂移影响（GRUB 手册：submenu>entry）。
+    local path gd
+    path=$(awk -F"'" '
+        /^[[:space:]]*submenu /   { d++; st[d]=$2; next }
+        /^[[:space:]]*menuentry / { if ($2 ~ /bbrv3/) { p=""; for (i=1;i<=d;i++) p=p st[i] ">"; print p $2; found=1; exit } next }
+        /^\}/                     { if (d>0) d-- }
+    ' /boot/grub/grub.cfg 2>/dev/null || true)
+
+    if [ -z "$path" ]; then
+        if grep -q 'vmlinuz-.*bbrv3' /boot/grub/grub.cfg 2>/dev/null; then
+            warn "未解析出 BBRv3 独立菜单项（grub.cfg 里有 bbrv3 内核）；重启后用 uname -r 确认"
+            return 0
         fi
-        idx=$((idx + 1))
-    done
-    [ "$target" -lt 0 ] && {
         warn "grub.cfg 中未找到 BBRv3 菜单项"
         return 1
-    }
-    if [ "$target" -eq 0 ]; then
-        ok "GRUB 默认引导项已是 BBRv3"
-        return 0
     fi
 
     gd=$(grep -oP '^GRUB_DEFAULT=\K.*' /etc/default/grub 2>/dev/null | head -1 || true)
-    if [ "$gd" = "saved" ]; then
-        if run grub-set-default "$target"; then
-            ok "GRUB_DEFAULT=saved 已设为 BBRv3 (index $target)"
-        else
-            warn "grub-set-default 失败"
-        fi
-    elif [ -z "$gd" ] || [ "$gd" = "0" ]; then
-        run sed -i "s/^GRUB_DEFAULT=.*/GRUB_DEFAULT=$target/" /etc/default/grub
-        run update-grub || warn "update-grub 失败，GRUB 默认项可能未保存"
-        ok "GRUB_DEFAULT 已设为 $target (BBRv3)"
-    else
-        info "GRUB_DEFAULT=$gd，BBRv3 位于 index $target；若重启未进新内核请手动改"
+    if [ "$gd" = "\"$path\"" ]; then
+        ok "GRUB 默认引导项已指向 BBRv3（$path）"
+        return 0
     fi
+
+    local _esc="${path//&/\\&}"
+    run sed -i "s|^GRUB_DEFAULT=.*|GRUB_DEFAULT=\"$_esc\"|" /etc/default/grub
+    if ! run update-grub; then
+        warn "update-grub 失败，GRUB 默认项可能未保存"
+        return 1
+    fi
+    ok "GRUB 默认引导项已设为 BBRv3：$path"
+    local setdef
+    setdef=$(grep -oP '^[[:space:]]*set default=\K.*' /boot/grub/grub.cfg 2>/dev/null | tail -1 || true)
+    [ -n "$setdef" ] && info "grub.cfg: set default=$setdef"
+    return 0
 }

@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-09-23 — 端到端实测发现的 3 个问题（GRUB 索引 / conntrack 失效 / 重跑白下）
+
+在 QQ/QQ2 新刷 Ubuntu 22.04 上跑真·一键脚本发现的（详见 vpnmax 同日条目，这里是镜像修复）：
+
+* **P1 `ensure_grub_boot` 索引算错**：只数 `menuentry` 不数 `submenu` → 算出 index 1，而真实 index 1 是 Advanced 子菜单（BBRv3 在子菜单第 0 项）。这次侬幸进对，但装了新内核后子菜单第 0 项会变 → 引导到错内核。改用「子菜单>条目」完整路径定位。
+* **P2 conntrack 重启后失效却报成功**：只 `modprobe` 不写 `/etc/modules-load.d/` → 重启后模块不加载，sysctl 那行开机静默失败，上限回落默认。修：写 `vpnplus-conntrack.conf` + **回读校验**。
+* **P3 重跑白下 141MB**：`install_bbrv3` 只判运行中的内核，不判「已装好只差重启」→ 重跑重下（约 3 分钟）。修：`/boot/vmlinuz-*bbrv3*` 存在则跳过下载。
+* **两份实现同步修改**：`lib/optimize.sh` + `deploy_optimize.sh` 内联兜底（各 4 处）。
+
 ## 2026-09-23 — 修复：慢速链路下内核下载必然失败（固定 --max-time + 无断点续传）
 
 * **症状**：`deploy_optimize.sh` 卡在内核下载，反复报 `curl: (28) Operation timed out after 120001 milliseconds with 105431013 out of 141161094 bytes received` / `Throwing away 105431013 bytes`。

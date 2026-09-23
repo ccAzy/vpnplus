@@ -3,29 +3,37 @@
 [ -n "${VPNPLUS_FIREWALL_LOADED:-}" ] && return 0
 VPNPLUS_FIREWALL_LOADED=1
 
-readonly HOP_HY_RANGE="40000:42000"     # Hysteria2 端口跳跃段
-readonly HOP_TU_RANGE="43000:45000"     # Tuic5 端口跳跃段
-readonly RATE_SYN_ABOVE=50; readonly RATE_SYN_BURST=100    # TCP 代理端口 SYN 限速 /sec、burst
-readonly RATE_UDP_ABOVE=200; readonly RATE_UDP_BURST=400   # UDP 端口/跳跃段 限速 /sec、burst
-readonly CONN_ABOVE=200                  # 单 IP 单端口新建连接上限
-readonly SSH_RATE_ABOVE=3; readonly SSH_RATE_BURST=5       # SSH 爆破防御 3/min、burst
+readonly HOP_HY_RANGE="40000:42000" # Hysteria2 端口跳跃段
+readonly HOP_TU_RANGE="43000:45000" # Tuic5 端口跳跃段
+readonly RATE_SYN_ABOVE=50
+readonly RATE_SYN_BURST=100 # TCP 代理端口 SYN 限速 /sec、burst
+readonly RATE_UDP_ABOVE=200
+readonly RATE_UDP_BURST=400 # UDP 端口/跳跃段 限速 /sec、burst
+readonly CONN_ABOVE=200     # 单 IP 单端口新建连接上限
+readonly SSH_RATE_ABOVE=3
+readonly SSH_RATE_BURST=5 # SSH 爆破防御 3/min、burst
 CHAIN_PORTHOP="ACVPN_PORTHOP"
 CHAIN_ANTIPROBE="ACVPN_ANTIPROBE"
 
 persist_firewall() {
-    if $DRY_RUN; then info "[dry-run] 持久化 iptables 规则"; return 0; fi
+    if $DRY_RUN; then
+        info "[dry-run] 持久化 iptables 规则"
+        return 0
+    fi
     local saved=false
     if netfilter-persistent save 2>/dev/null && command -v netfilter-persistent >/dev/null 2>&1; then
-        ok "防火墙规则已持久化 (netfilter-persistent)"; saved=true
+        ok "防火墙规则已持久化 (netfilter-persistent)"
+        saved=true
     elif service iptables save 2>/dev/null; then
-        ok "防火墙规则已持久化 (iptables service)"; saved=true
+        ok "防火墙规则已持久化 (iptables service)"
+        saved=true
     fi
     # 无论上述哪种成功，都额外保留一份明文快照 + 自建恢复 unit，双保险
     mkdir -p /etc/iptables 2>/dev/null || true
-    iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
-    ip6tables-save > /etc/iptables/rules.v6 2>/dev/null || true
+    iptables-save >/etc/iptables/rules.v4 2>/dev/null || true
+    ip6tables-save >/etc/iptables/rules.v6 2>/dev/null || true
     if [ -s /etc/iptables/rules.v4 ]; then
-        cat > /etc/systemd/system/vpnplus-netfilter-restore.service <<'UNIT'
+        cat >/etc/systemd/system/vpnplus-netfilter-restore.service <<'UNIT'
 [Unit]
 Description=vpnplus iptables restore (before network)
 DefaultDependencies=no
@@ -53,18 +61,21 @@ UNIT
     return 0
 }
 
-
-
 apply_antiprobe() {
-    [ -f /etc/s-box/sb.json ] || { warn "sb.json 不存在，跳过防主动探测"; return 1; }
+    [ -f /etc/s-box/sb.json ] || {
+        warn "sb.json 不存在，跳过防主动探测"
+        return 1
+    }
     info "配置防主动探测（独立链 $CHAIN_ANTIPROBE）..."
     local -a TCP_PORTS=() UDP_PORTS=()
     local VM_PORT="" p type tls_en
 
     while IFS='|' read -r p type tls_en; do
         [ -z "$p" ] || [ "$p" = "null" ] && continue
-        if [ "$type" = "vmess" ] && [ "$tls_en" = "false" ]; then VM_PORT="$p"
-        elif [ "$type" = "hysteria2" ] || [ "$type" = "tuic" ]; then UDP_PORTS+=("$p")
+        if [ "$type" = "vmess" ] && [ "$tls_en" = "false" ]; then
+            VM_PORT="$p"
+        elif [ "$type" = "hysteria2" ] || [ "$type" = "tuic" ]; then
+            UDP_PORTS+=("$p")
         else TCP_PORTS+=("$p"); fi
     done < <(jq -r '.inbounds[] | "\(.listen_port)|\(.type)|\(.tls.enabled // "false")"' /etc/s-box/sb.json 2>/dev/null || true)
 
@@ -91,30 +102,31 @@ apply_antiprobe() {
     for p in "${TCP_PORTS[@]}"; do
         [ "$p" = "$VM_PORT" ] && continue
         run iptables -A "$CHAIN_ANTIPROBE" -p tcp --dport "$p" -m state --state NEW -m hashlimit \
-          --hashlimit-above "$RATE_SYN_ABOVE"/sec --hashlimit-burst "$RATE_SYN_BURST" --hashlimit-mode srcip --hashlimit-name "probe$i" -j DROP
+            --hashlimit-above "$RATE_SYN_ABOVE"/sec --hashlimit-burst "$RATE_SYN_BURST" --hashlimit-mode srcip --hashlimit-name "probe$i" -j DROP
         command -v ip6tables >/dev/null 2>&1 && run ip6tables -A "$CHAIN_ANTIPROBE" -p tcp --dport "$p" -m state --state NEW -m hashlimit \
-          --hashlimit-above "$RATE_SYN_ABOVE"/sec --hashlimit-burst "$RATE_SYN_BURST" --hashlimit-mode srcip --hashlimit-name "probe$i" -j DROP || true
+            --hashlimit-above "$RATE_SYN_ABOVE"/sec --hashlimit-burst "$RATE_SYN_BURST" --hashlimit-mode srcip --hashlimit-name "probe$i" -j DROP || true
         i=$((i + 1))
     done
 
     # 3) UDP 代理主端口限速
     for p in "${UDP_PORTS[@]}"; do
         run iptables -A "$CHAIN_ANTIPROBE" -p udp --dport "$p" -m hashlimit \
-          --hashlimit-above "$RATE_UDP_ABOVE"/sec --hashlimit-burst "$RATE_UDP_BURST" --hashlimit-mode srcip --hashlimit-name "probe$i" -j DROP
+            --hashlimit-above "$RATE_UDP_ABOVE"/sec --hashlimit-burst "$RATE_UDP_BURST" --hashlimit-mode srcip --hashlimit-name "probe$i" -j DROP
         command -v ip6tables >/dev/null 2>&1 && run ip6tables -A "$CHAIN_ANTIPROBE" -p udp --dport "$p" -m hashlimit \
-          --hashlimit-above "$RATE_UDP_ABOVE"/sec --hashlimit-burst "$RATE_UDP_BURST" --hashlimit-mode srcip --hashlimit-name "probe$i" -j DROP || true
+            --hashlimit-above "$RATE_UDP_ABOVE"/sec --hashlimit-burst "$RATE_UDP_BURST" --hashlimit-mode srcip --hashlimit-name "probe$i" -j DROP || true
         i=$((i + 1))
     done
 
     # 4) UDP 跳跃段限速
     run iptables -A "$CHAIN_ANTIPROBE" -p udp --dport "$HOP_HY_RANGE" -m hashlimit \
-      --hashlimit-above "$RATE_UDP_ABOVE"/sec --hashlimit-burst "$RATE_UDP_BURST" --hashlimit-mode srcip --hashlimit-name "probe$i" -j DROP
+        --hashlimit-above "$RATE_UDP_ABOVE"/sec --hashlimit-burst "$RATE_UDP_BURST" --hashlimit-mode srcip --hashlimit-name "probe$i" -j DROP
     run iptables -A "$CHAIN_ANTIPROBE" -p udp --dport "$HOP_TU_RANGE" -m hashlimit \
-      --hashlimit-above "$RATE_UDP_ABOVE"/sec --hashlimit-burst "$RATE_UDP_BURST" --hashlimit-mode srcip --hashlimit-name "probe$i" -j DROP
+        --hashlimit-above "$RATE_UDP_ABOVE"/sec --hashlimit-burst "$RATE_UDP_BURST" --hashlimit-mode srcip --hashlimit-name "probe$i" -j DROP
     command -v ip6tables >/dev/null 2>&1 && {
         run ip6tables -A "$CHAIN_ANTIPROBE" -p udp --dport "$HOP_HY_RANGE" -m hashlimit --hashlimit-above "$RATE_UDP_ABOVE"/sec --hashlimit-burst "$RATE_UDP_BURST" --hashlimit-mode srcip --hashlimit-name "probe$i" -j DROP || true
         run ip6tables -A "$CHAIN_ANTIPROBE" -p udp --dport "$HOP_TU_RANGE" -m hashlimit --hashlimit-above "$RATE_UDP_ABOVE"/sec --hashlimit-burst "$RATE_UDP_BURST" --hashlimit-mode srcip --hashlimit-name "probe$i" -j DROP || true
-    }; i=$((i + 2))
+    }
+    i=$((i + 2))
 
     # 5) SSH 爆破防御（轻量 fail2ban）
     # SSH 端口不写死 22：2026-09-23 实测服务器 SSH 常在 6688，写死 22 等于保护了错端口。
@@ -124,9 +136,9 @@ apply_antiprobe() {
     _ssh_port="${_ssh_port:-22}"
     info "SSH 爆破防御目标端口: $_ssh_port"
     run iptables -A "$CHAIN_ANTIPROBE" -p tcp --dport "$_ssh_port" -m state --state NEW -m hashlimit \
-      --hashlimit-above "$SSH_RATE_ABOVE"/min --hashlimit-burst "$SSH_RATE_BURST" --hashlimit-mode srcip --hashlimit-name probeSSH -j DROP
+        --hashlimit-above "$SSH_RATE_ABOVE"/min --hashlimit-burst "$SSH_RATE_BURST" --hashlimit-mode srcip --hashlimit-name probeSSH -j DROP
     command -v ip6tables >/dev/null 2>&1 && run ip6tables -A "$CHAIN_ANTIPROBE" -p tcp --dport "$_ssh_port" -m state --state NEW -m hashlimit \
-      --hashlimit-above "$SSH_RATE_ABOVE"/min --hashlimit-burst "$SSH_RATE_BURST" --hashlimit-mode srcip --hashlimit-name probeSSH -j DROP || true
+        --hashlimit-above "$SSH_RATE_ABOVE"/min --hashlimit-burst "$SSH_RATE_BURST" --hashlimit-mode srcip --hashlimit-name probeSSH -j DROP || true
 
     # 6) 单 IP 连接数上限
     for p in "${TCP_PORTS[@]}"; do
@@ -143,10 +155,11 @@ apply_antiprobe() {
     ok "防主动探测已启用: ${#TCP_PORTS[@]} TCP + ${#UDP_PORTS[@]} UDP + SSH + 单IP连接数上限 + IPv6对称（独立链 $CHAIN_ANTIPROBE）"
 }
 
-
-
 config_port_hopping() {
-    [ -f /etc/s-box/sb.json ] || { warn "sb.json 不存在，跳过端口跳跃"; return 1; }
+    [ -f /etc/s-box/sb.json ] || {
+        warn "sb.json 不存在，跳过端口跳跃"
+        return 1
+    }
     info "配置端口跳跃（独立链 $CHAIN_PORTHOP）..."
     local HY_PORT TU_PORT
     HY_PORT=$(jq -r '.inbounds[] | select(.type=="hysteria2") | .listen_port' /etc/s-box/sb.json 2>/dev/null || true)
@@ -172,10 +185,13 @@ config_port_hopping() {
     # 按行号删除 PREROUTING 中任何 HOP_HY_RANGE / HOP_TU_RANGE 的 UDP DNAT/REDIRECT（不碰 ACVPN_PORTHOP 链内规则与原样跳转）
     while :; do
         local rnum
-        rnum=$(iptables -t nat -L PREROUTING -n --line-numbers 2>/dev/null \
-            | awk -v hy="$HOP_HY_RANGE" -v tu="$HOP_TU_RANGE" '$2=="DNAT"||$2=="REDIRECT" { if ($0 ~ hy || $0 ~ tu) {print $1; exit} }')
+        rnum=$(iptables -t nat -L PREROUTING -n --line-numbers 2>/dev/null |
+            awk -v hy="$HOP_HY_RANGE" -v tu="$HOP_TU_RANGE" '$2=="DNAT"||$2=="REDIRECT" { if ($0 ~ hy || $0 ~ tu) {print $1; exit} }')
         [ -z "$rnum" ] && break
-        run iptables -t nat -D PREROUTING "$rnum" 2>/dev/null && { ok "清除残留规则 #$rnum"; done_hop=true; } || break
+        run iptables -t nat -D PREROUTING "$rnum" 2>/dev/null && {
+            ok "清除残留规则 #$rnum"
+            done_hop=true
+        } || break
     done
     if [ "$done_hop" = false ]; then info "PREROUTING 端口跳跃段已干净，无需清理（幂等）"; fi
 
@@ -202,53 +218,52 @@ config_port_hopping() {
     persist_firewall
 }
 
-
 if ! declare -F bak_firewall >/dev/null 2>&1; then
-bak_firewall() {
-    echo "--- 备份防火墙规则 ---"
-    run mkdir -p "$BAK_DIR"
-    local stamp
-    stamp=$(date +%Y%m%d-%H%M%S)
-    if command -v iptables-save >/dev/null 2>&1; then
-        run bash -c "iptables-save > '$BAK_DIR/iptables.$stamp' 2>/dev/null"
-        run bash -c "ip6tables-save > '$BAK_DIR/ip6tables.$stamp' 2>/dev/null || true"
-        ok "iptables 规则已备份到 $BAK_DIR (iptables.$stamp)"
-    fi
-    if command -v nft >/dev/null 2>&1; then
-        run bash -c "nft list ruleset > '$BAK_DIR/nftables.$stamp' 2>/dev/null || true"
-    fi
-}
+    bak_firewall() {
+        echo "--- 备份防火墙规则 ---"
+        run mkdir -p "$BAK_DIR"
+        local stamp
+        stamp=$(date +%Y%m%d-%H%M%S)
+        if command -v iptables-save >/dev/null 2>&1; then
+            run bash -c "iptables-save > '$BAK_DIR/iptables.$stamp' 2>/dev/null"
+            run bash -c "ip6tables-save > '$BAK_DIR/ip6tables.$stamp' 2>/dev/null || true"
+            ok "iptables 规则已备份到 $BAK_DIR (iptables.$stamp)"
+        fi
+        if command -v nft >/dev/null 2>&1; then
+            run bash -c "nft list ruleset > '$BAK_DIR/nftables.$stamp' 2>/dev/null || true"
+        fi
+    }
 fi
 
 if ! declare -F clean_chains >/dev/null 2>&1; then
-clean_chains() {
-    echo "--- 清理 vpnplus 独立防火墙链 ---"
-    run iptables -D INPUT -j "$CHAIN_ANTIPROBE" 2>/dev/null
-    run iptables -D INPUT -j "$CHAIN_RSS" 2>/dev/null
-    run iptables -t nat -D PREROUTING -j "$CHAIN_PORTHOP" 2>/dev/null
-    if command -v ip6tables >/dev/null 2>&1; then
-        run ip6tables -D INPUT -j "$CHAIN_ANTIPROBE" 2>/dev/null
-        run ip6tables -t nat -D PREROUTING -j "$CHAIN_PORTHOP" 2>/dev/null
-    fi
-    run iptables -F "$CHAIN_ANTIPROBE" 2>/dev/null
-    run iptables -X "$CHAIN_ANTIPROBE" 2>/dev/null
-    run iptables -F "$CHAIN_RSS" 2>/dev/null
-    run iptables -X "$CHAIN_RSS" 2>/dev/null
-    run iptables -t nat -F "$CHAIN_PORTHOP" 2>/dev/null
-    run iptables -t nat -X "$CHAIN_PORTHOP" 2>/dev/null
-    if command -v ip6tables >/dev/null 2>&1; then
-        run ip6tables -F "$CHAIN_ANTIPROBE" 2>/dev/null
-        run ip6tables -X "$CHAIN_ANTIPROBE" 2>/dev/null
-        run ip6tables -t nat -F "$CHAIN_PORTHOP" 2>/dev/null
-        run ip6tables -t nat -X "$CHAIN_PORTHOP" 2>/dev/null
-    fi
-    command -v iptables >/dev/null 2>&1 && {
-        iptables -t nat -L PREROUTING --line-numbers -n 2>/dev/null |
-          grep -E '(DNAT|REDIRECT).*dpts:(40000:42000|43000:45000|40000:41000|43000:44000) ' |
-          awk '{print $1}' | sort -rn | while read -r num; do
-            run iptables -t nat -D PREROUTING "$num"
-        done
+    clean_chains() {
+        echo "--- 清理 vpnplus 独立防火墙链 ---"
+        run iptables -D INPUT -j "$CHAIN_ANTIPROBE" 2>/dev/null
+        run iptables -D INPUT -j "$CHAIN_RSS" 2>/dev/null
+        run iptables -t nat -D PREROUTING -j "$CHAIN_PORTHOP" 2>/dev/null
+        if command -v ip6tables >/dev/null 2>&1; then
+            run ip6tables -D INPUT -j "$CHAIN_ANTIPROBE" 2>/dev/null
+            run ip6tables -t nat -D PREROUTING -j "$CHAIN_PORTHOP" 2>/dev/null
+        fi
+        run iptables -F "$CHAIN_ANTIPROBE" 2>/dev/null
+        run iptables -X "$CHAIN_ANTIPROBE" 2>/dev/null
+        run iptables -F "$CHAIN_RSS" 2>/dev/null
+        run iptables -X "$CHAIN_RSS" 2>/dev/null
+        run iptables -t nat -F "$CHAIN_PORTHOP" 2>/dev/null
+        run iptables -t nat -X "$CHAIN_PORTHOP" 2>/dev/null
+        if command -v ip6tables >/dev/null 2>&1; then
+            run ip6tables -F "$CHAIN_ANTIPROBE" 2>/dev/null
+            run ip6tables -X "$CHAIN_ANTIPROBE" 2>/dev/null
+            run ip6tables -t nat -F "$CHAIN_PORTHOP" 2>/dev/null
+            run ip6tables -t nat -X "$CHAIN_PORTHOP" 2>/dev/null
+        fi
+        command -v iptables >/dev/null 2>&1 && {
+            iptables -t nat -L PREROUTING --line-numbers -n 2>/dev/null |
+                grep -E '(DNAT|REDIRECT).*dpts:(40000:42000|43000:45000|40000:41000|43000:44000) ' |
+                awk '{print $1}' | sort -rn | while read -r num; do
+                run iptables -t nat -D PREROUTING "$num"
+            done
+        }
+        ok "独立防火墙链已清理（未触碰第三方规则）"
     }
-    ok "独立防火墙链已清理（未触碰第三方规则）"
-}
 fi
