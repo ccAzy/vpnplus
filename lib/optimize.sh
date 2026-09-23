@@ -70,7 +70,10 @@ install_bbrv3() {
         fail "BBRv3 下载不完整：${_sz}B / ${_want}B"
         return 1
     fi
-    if [ "$_sz" -eq 0 ]; then fail "BBRv3 下载失败"; return 1; fi
+    if [ "$_sz" -eq 0 ]; then
+        fail "BBRv3 下载失败"
+        return 1
+    fi
 
     # ── 校验和：尽力而为，绝不阻断 ──
     # 上游（byJoey/Actions-bbr-v3 → ccAzy fork）都不产出 SHA256SUMS。
