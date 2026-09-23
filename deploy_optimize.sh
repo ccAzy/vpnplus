@@ -311,7 +311,10 @@ if ! declare -F install_bbrv3 >/dev/null 2>&1; then
         # 已装好、只差重启：直接跳过下载。否则会白下 141MB（2026-09-23 实测约 3 分钟）。
         local _installed_kernel="" _k
         for _k in /boot/vmlinuz-*bbrv3*; do
-            [ -e "$_k" ] && { _installed_kernel="$_k"; break; }
+            [ -e "$_k" ] && {
+                _installed_kernel="$_k"
+                break
+            }
         done
         if [ -n "$_installed_kernel" ]; then
             ok "BBRv3 内核已安装（$_installed_kernel），只差重启生效 —— 跳过下载"
@@ -460,12 +463,17 @@ if ! declare -F apply_sysctl >/dev/null 2>&1; then
             fi
             run modprobe nf_conntrack || true
         fi
-        # 开机也要有 nf_conntrack：否则 /etc/sysctl.d 里那行 nf_conntrack_max 在 boot 时写不进去
-        # （2026-09-23 实测：重启后 /proc/sys/net/netfilter/nf_conntrack_max 不存在，130000 丢失）。
-        atomic_write /etc/modules-load.d/vpnplus-conntrack.conf <<'MODS'
+        # 开机也要有 nf_conntrack：否则 /etc/sysctl.d 里那行 nf_conntrack_max 在 boot 时写不进去。
+        # 只写「真以模块形式存在」的情况：内建内核上写了会让 systemd-modules-load 开机报错。
+        if modinfo -n nf_conntrack >/dev/null 2>&1; then
+            mkdir -p /etc/modules-load.d 2>/dev/null || true
+            atomic_write /etc/modules-load.d/vpnplus-conntrack.conf <<'MODS'
 # vpnplus：让 nf_conntrack 开机加载，保证 net.netfilter.nf_conntrack_max 能应用
 nf_conntrack
 MODS
+        else
+            info "nf_conntrack 为内建（非模块），无需写 modules-load.d"
+        fi
         if [ -w /sys/module/nf_conntrack/parameters/hashsize ]; then
             if ! run bash -c "printf '%s\\n' '$CONNTRACK_HASH' > /sys/module/nf_conntrack/parameters/hashsize"; then
                 warn "nf_conntrack hashsize 写入失败，连接跟踪仍使用内核默认桶数"
