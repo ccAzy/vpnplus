@@ -5,10 +5,11 @@
 # 幂等设计：已优化过的服务器再次运行会自动跳过，不会重复重启
 #
 # 相对旧版 ACVPN 的关键改进：
-#   1. 内核 SHA256 校验改为【强制】：SHA256SUMS 获取失败或找不到目标包 → 直接中止，
-#      不再降级为"仅警告后照装"。内核是最高权限组件，不允许无声降级。
+#   1. 内核校验和为【尽力而为】：上游提供 SHA256SUMS 就比对，没有/对不上只告警，
+#      绝不阻断安装（上游 byJoey/Actions-bbr-v3 → ccAzy fork 都不产出校验和）。
+#      决策依据：2026-09-23 用户拍板「默认信任上游，不为其维护哈希」。
 #   2. 内核下载地址锁定到明确的 release tag（可配置 VERSION_PIN），
-#      不做"API 动态取最新"的不确定性拼接；未锁定版本则强制校验。
+#      不做"API 动态取最新"的不确定性拼接。
 #   3. 所有命令替换统一 || true 防 set -e 静默退出。
 #   4. 全程写部署清单 /var/log/vpnplus-optimize-manifest.log（来源/版本/校验值）。
 #   5. 支持 --dry-run 预览 + --no-reboot。
@@ -44,7 +45,7 @@ vpnplus deploy_optimize.sh — 服务器暴力优化（BBRv3 + 网络极限压�
   --no-reboot            完成优化后不自动重启（手动 reboot 生效）
   --dry-run              只打印将执行的动作，不实际修改系统
   --force                已优化也重跑（覆盖安装，`bash <(curl ...) --force` 一键重跑）
-  VERSION_PIN=x.y.z      锁定 BBRv3 内核版本；缺省时取 release 最新并强制校验
+  VERSION_PIN=x.y.z      锁定 BBRv3 内核版本；缺省时取 release 最新
 HELP
         exit 0 ;;
     esac
@@ -239,9 +240,10 @@ PUBLIC_IP=$(curl -fsSL --max-time 5 https://api.ipify.org 2>/dev/null) \
 [ "$PUBLIC_IP" = "unknown" ] && warn "无法获取公网 IP，网络可能受限"
 
 # ── BBRv3 内核安装 ──
-# 关键安全点：SHA256 校验【强制】。下载地址优先：
+# 下载地址优先：
 #   1) 若 VERSION_PIN 指定 → 精确拼接该 tag 的下载 URL（无 API 不确定性）
-#   2) 否则 → API 取最新 max tag，并同样强制 SHA256 校验
+#   2) 否则 → API 取最新 max tag
+# 校验和：有就比对、没有就跳过（只告警，不阻断）
 if ! declare -F install_bbrv3 >/dev/null 2>&1; then
 install_bbrv3() {
     if echo "$CUR_KERNEL" | grep -q "bbrv3"; then
@@ -287,27 +289,25 @@ install_bbrv3() {
         fail "BBRv3 下载失败"; return 1
     fi
 
-    # ── 强制 SHA256 校验（与旧版最大差异：失败即中止，不降级） ──
+    # ── 校验和：尽力而为，绝不阻断 ──
+    # 上游（byJoey/Actions-bbr-v3 → ccAzy fork）都不产出 SHA256SUMS。
+    # 原先把它设为强制 → 必然中止、内核永远装不上。2026-09-23 拍板：默认信任上游，
+    # 降级为「有就比对、没有或对不上只告警」，不阻断安装，也不需要任何人维护哈希。
     local pkg_name sha_url expected actual
     pkg_name=$(basename "$DOWNLOAD_URL")
     sha_url="$(dirname "$DOWNLOAD_URL")/SHA256SUMS"
-    info "强制 SHA256 校验: $(basename "$sha_url")"
-    if ! run curl -fsSL -H "$UA" --retry 2 --retry-delay 2 --max-time 20 -o /tmp/bbrv3.sha256 "$sha_url" || [ ! -s /tmp/bbrv3.sha256 ]; then
-        fail "SHA256SUMS 无法获取 —— 为安全起见中止安装（内核为最高权限组件，不接受无校验安装）"
-        return 1
-    fi
-    expected=$(awk -v f="$pkg_name" '$2 == f || $2 == "*" f {print $1; exit}' /tmp/bbrv3.sha256 2>/dev/null || true)
-    if [ -z "$expected" ]; then
-        fail "SHA256SUMS 中未找到 $pkg_name —— 中止安装（版本不匹配风险）"
-        return 1
-    fi
     actual=$(sha256sum /tmp/bbrv3.deb 2>/dev/null | awk '{print $1}' || true)
-    if [ "$expected" != "$actual" ]; then
-        fail "SHA256 校验失败（下载可能损坏或被篡改）—— 中止安装"
-        return 1
+    if curl -fsSL -H "$UA" --retry 1 --max-time 15 -o /tmp/bbrv3.sha256 "$sha_url" 2>/dev/null && [ -s /tmp/bbrv3.sha256 ]; then
+        expected=$(awk -v f="$pkg_name" '$2 == f || $2 == "*" f {print $1; exit}' /tmp/bbrv3.sha256 2>/dev/null || true)
+        if [ -n "$expected" ] && [ "$expected" = "$actual" ]; then
+            ok "SHA256 校验通过 ($actual)"
+        else
+            warn "SHA256 未通过比对（expected=${expected:-无} actual=${actual:-无}）—— 按既定策略继续安装"
+        fi
+    else
+        warn "上游未提供 SHA256SUMS（已知情况）—— 跳过校验，继续安装"
     fi
-    ok "SHA256 校验通过 ($actual)"
-    manifest "BBRv3 $pkg_name sha256=$actual url=$DOWNLOAD_URL"
+    manifest "BBRv3 $pkg_name sha256=${actual:-unknown} url=$DOWNLOAD_URL"
 
     if ! run dpkg -i /tmp/bbrv3.deb; then
         run apt-get install -f -y -qq || true

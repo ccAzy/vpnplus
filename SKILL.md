@@ -13,7 +13,7 @@ description: >
 |------|------|
 | `SKILL.md` | 本文件 — 完整部署指南 |
 | `bootstrap.sh` | **部署前置** — 基础依赖安装与环境检查（不改防火墙/不重启） |
-| `deploy_optimize.sh` | **第1步** — BBRv3 强制校验 + TCP/UDP + ethtool + 动态 RPS/XPS/fq + 自动重启 |
+| `deploy_optimize.sh` | **第1步** — BBRv3 安装 + TCP/UDP + ethtool + 动态 RPS/XPS/fq + 自动重启 |
 | `deploy_singbox.sh` | **第2步** — sing-box 部署（独立防火墙链 + 订阅 + Argo + WARP） |
 | `cleanup.sh` | 独立清理脚本（只删 vpnplus 自己的防火墙链，自动备份） |
 | `verify.sh` | 部署后验证（进程/端口/BBR/fq/网卡/独立链/Argo/订阅/域名分流） |
@@ -22,7 +22,7 @@ description: >
 
 1. **独立防火墙链**：所有 vpnplus 规则收敛到 `ACVPN_ANTIPROBE`（filter INPUT）+ `ACVPN_PORTHOP`（nat PREROUTING）命名链，主链仅一条跳转（`-I INPUT 1 -j ACVPN_ANTIPROBE`）。重跑/卸载只 `-F/-X` 自己的链，绝不用 `limit: above`/`#conn` 全局匹配删 INPUT 规则 → 保护 fail2ban/Docker 等第三方规则。
 2. **外部脚本锁定**：sb.sh 固定 commit `5001e76efc9e15eac1f8ff33a0b389172e331e1d` + SHA256 `65113dd45eba3bb377e71e89f01d77d84537757771802898acc6e60f36bf06be`，失败即中止。
-3. **内核强制校验**：SHA256SUMS 缺失/失败 → 中止，不降级照装。
+3. **内核校验和＝尽力而为（不阻断）**：上游 release 提供 `SHA256SUMS` 就比对，**没有或对不上只告警**，不影响安装。上游（`byJoey/Actions-bbr-v3` → `ccAzy/Actions-bbr-v3`）都不产出校验和，所以不把它当门禁——2026-09-23 拍板：默认信任上游，不为其维护哈希资产。
 4. **核心/可选失败语义**：`install_singbox_yg`/`setup_subscription`/`start_argo` 失败记入 `DEPLOY_OK=false`，未完全成功不写 `/etc/.vpnplus-singbox`。
 5. **精确进程清理**：busybox 按监听端口定位 PID 停止，不 `pkill -x busybox` 杀全局。
 6. **默认不启用防火墙**：`VMESS_LOCK` 默认 `off`（明文 VMess 端口公网直连，适合密钥登录+关闭密码登录、无多余暴露面的节点全通场景）。需要防主动探测时设 `VMESS_LOCK=on`（明文 VMess 公网 DROP，仅 Argo 回环可达）。
@@ -53,7 +53,7 @@ bash bootstrap.sh --dry-run
 > `apt-get update && apt-get install -y curl`
 > 跳过部署前置也可以：两个部署脚本会各自兜底安装依赖。
 
-### 第 1 步：暴力优化 + BBRv3（强制校验） + 重启
+### 第 1 步：暴力优化 + BBRv3 + 重启
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/ccAzy/vpnplus/main/deploy_optimize.sh)
@@ -61,7 +61,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/ccAzy/vpnplus/main/deploy_op
 
 自动完成：
 1. 清理旧 sing-box 残留（保留已部署的 /etc/s-box）
-2. 安装 BBRv3 内核（**SHA256 强制校验**，缺失/失败即中止）
+2. 安装 BBRv3 内核（校验和尽力而为：上游有就比对，缺失只告警）
 3. 应用网络优化（TCP/UDP 缓冲、BBR/fq、所有 RX/TX 队列的 RPS/XPS、ethtool，按内存分级防 OOM）
 4. 提升系统资源限制（nofile/nproc）
 5. 校验 GRUB 默认引导新内核

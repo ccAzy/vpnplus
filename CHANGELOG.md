@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-09-23 — 内核校验和降级为「尽力而为」：不再阻断安装
+
+* **起因**：用户反馈 `bash <(curl .../deploy_optimize.sh)` 装不上 BBRv3 内核。
+* **根因**：`install_bbrv3` 把 `SHA256SUMS` 设为**强制**，而上游（`byJoey/Actions-bbr-v3` → `ccAzy/Actions-bbr-v3`）**都不产出这个文件**——`x86_64-7.2.5/6/7-max`、`arm64-7.2.7-max` 全部 404，上游构建工作流里也没有任何 `sha256sum` 步骤。于是校验必然失败 → `install_bbrv3` 必然中止 → 内核永远装不上。（`deploy_singbox.sh` 里 sb.sh 的 SHA256 不受影响：那个哈希真实存在且可校验。）
+* **决定（用户拍板）：默认信任上游，不为其维护哈希资产。** 在仓库里固化哈希（上游一重建就变、又要人工重算）与让 CI 生成校验和，都被否决；最终采用**「有就比对、没有或对不上只告警」，绝不阻断**，哈希仍写入部署清单留痕。
+* **改动**：
+  - `lib/optimize.sh` 与 `deploy_optimize.sh` 内联兜底**两份** `install_bbrv3` 同步修改（各删 3 处中止分支）
+  - `deploy_optimize.sh`：头部改进说明、内核段落注释、`--help` 文案
+  - `SKILL.md`：文件总览、核心安全设计 #3
+* **验证**（临时 harness 对照修复前后，跑完已删）：同一条件（模拟上游 404）下——修复前 `return=1` 报「SHA256SUMS 无法获取…中止安装」；修复后 `return=0` 报「上游未提供 SHA256SUMS（已知情况）—— 跳过校验，继续安装」→「BBRv3 已安装」。
+* **边界**：不校验等于放弃「来源真实性」保证，只剩 HTTPS 传输完整性。用户明确接受。**后续不要以「安全」为由把这道门禁加回来。**
+
 ## 2026-08-27 — IPv4 全链路强制锁定（JP/HK 订阅回退根因，e3dc9c5）
 
 * **P0 IPv4 全链路 `ipv4_only`**：`sb-yg` 每次 `3-8-1 设置本地IP订阅 / 14-1 WARP / 5-3-1 域名分流` 重建 `sb.json` 会重置 `yg_kkk: prefer_ipv6`，导致 JP/HK `sb.json` 订阅更新后回退 v6、移动端仍 `2a06`。`lib/singbox.sh:force_ipv4_lock` 改原子单次 `jq` 锁 `route.rules[].strategy + dns.strategy/dns.servers[].strategy + outbounds direct/socks.domain_strategy = ipv4_only`，幂等（`cmp` 无变化不重启）、`gai.conf` 去重单行、`legacy env` 前置防 `FATAL`，`verify.sh` 同 `jq` 校验 `IPv4 锁定已生效`，`README/SKILL` 同步。双机热补验证 `inject prefer_ipv6 → jq ok → active → ipv4_only` 通过。
