@@ -8,13 +8,15 @@ install_bbrv3() {
         local cur_ver latest_tag latest_ver
         cur_ver=$(echo "$CUR_KERNEL" | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+' || true)
         latest_tag=$(curl -fsL -H "$UA" --retry 2 --retry-delay 2 --connect-timeout 10 --max-time 20 \
-          "https://api.github.com/repos/ccAzy/Actions-bbr-v3/releases?per_page=10" 2>/dev/null \
-          | jq -r '.[].tag_name // empty' | grep -F 'max' | head -1 || true)
+            "https://api.github.com/repos/ccAzy/Actions-bbr-v3/releases?per_page=10" 2>/dev/null |
+            jq -r '.[].tag_name // empty' | grep -F 'max' | head -1 || true)
         latest_ver=$(echo "$latest_tag" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
         if [ -z "$latest_ver" ]; then
-            ok "已是 BBRv3: $CUR_KERNEL（无法确认最新版本，跳过）"; return 0
+            ok "已是 BBRv3: $CUR_KERNEL（无法确认最新版本，跳过）"
+            return 0
         elif [ "$cur_ver" = "$latest_ver" ]; then
-            ok "已是最新 BBRv3: $CUR_KERNEL"; return 0
+            ok "已是最新 BBRv3: $CUR_KERNEL"
+            return 0
         else
             warn "当前 $CUR_KERNEL，最新 ${latest_ver}，开始升级..."
         fi
@@ -25,27 +27,50 @@ install_bbrv3() {
 
     if [ -n "$VERSION_PIN" ]; then
         # 显式锁定版本：TAG = ${ARCH}-${VERSION}-max
-        local arch_tag="$DEB_ARCH"; [ "$DEB_ARCH" = "amd64" ] && arch_tag="x86_64"
+        local arch_tag="$DEB_ARCH"
+        [ "$DEB_ARCH" = "amd64" ] && arch_tag="x86_64"
         TAG="${arch_tag}-${VERSION_PIN}-max"
         info "锁定版本: $TAG"
         api_json=$(curl -fsL -H "$UA" --retry 2 --retry-delay 2 --connect-timeout 15 --max-time 30 \
-          "https://api.github.com/repos/ccAzy/Actions-bbr-v3/releases/tags/${TAG}" 2>/dev/null || true)
-        DOWNLOAD_URL=$(echo "$api_json" | jq -r '.assets[]?.browser_download_url // empty' \
-          | grep -F "linux-image-" | grep -F "joeyblog-bbrv3" | grep -F "$DEB_ARCH.deb" | head -1 || true)
+            "https://api.github.com/repos/ccAzy/Actions-bbr-v3/releases/tags/${TAG}" 2>/dev/null || true)
+        DOWNLOAD_URL=$(echo "$api_json" | jq -r '.assets[]?.browser_download_url // empty' |
+            grep -F "linux-image-" | grep -F "joeyblog-bbrv3" | grep -F "$DEB_ARCH.deb" | head -1 || true)
     else
         # 默认：取最新 -max release
         api_json=$(curl -fsL -H "$UA" --retry 2 --retry-delay 2 --connect-timeout 10 --max-time 20 \
-          "https://api.github.com/repos/ccAzy/Actions-bbr-v3/releases?per_page=10" 2>/dev/null || true)
-        DOWNLOAD_URL=$(echo "$api_json" | jq -r '.[].assets[]?.browser_download_url // empty' \
-          | grep -F "linux-image-" | grep -F "joeyblog-bbrv3-max" | grep -F "$DEB_ARCH.deb" | head -1 || true)
+            "https://api.github.com/repos/ccAzy/Actions-bbr-v3/releases?per_page=10" 2>/dev/null || true)
+        DOWNLOAD_URL=$(echo "$api_json" | jq -r '.[].assets[]?.browser_download_url // empty' |
+            grep -F "linux-image-" | grep -F "joeyblog-bbrv3-max" | grep -F "$DEB_ARCH.deb" | head -1 || true)
     fi
 
-    [ -z "$DOWNLOAD_URL" ] && { fail "无法获取任何可用的 BBRv3 下载地址（API 与 kernel.org 均失败）"; return 1; }
+    [ -z "$DOWNLOAD_URL" ] && {
+        fail "无法获取任何可用的 BBRv3 下载地址（API 与 kernel.org 均失败）"
+        return 1
+    }
 
     info "下载 BBRv3... ($(basename "$DOWNLOAD_URL"))"
-    if ! run curl -fL# -H "$UA" --retry 3 --retry-delay 2 --retry-connrefused --connect-timeout 15 --max-time 120 -o /tmp/bbrv3.deb "$DOWNLOAD_URL" || [ ! -s /tmp/bbrv3.deb ]; then
-        fail "BBRv3 下载失败"; return 1
+    # 断点续传 + 停滞判定：固定 --max-time 在慢速链路必然失败（141MB@0.84MB/s 需 161s > 120s），
+    # 且不带 -C - 的 --retry 会丢弃已下载字节重下（curl 的 "Throwing away N bytes"）。
+    local _want _sz _i=0
+    _want=$(curl -fsSLI -H "$UA" --connect-timeout 15 --max-time 30 "$DOWNLOAD_URL" 2>/dev/null |
+        awk 'tolower($0) ~ /^content-length:/ {gsub(/[^0-9]/, "", $2); print $2}' | tail -1 || true)
+    while [ "$_i" -lt 20 ]; do
+        _i=$((_i + 1))
+        if curl -fL# -H "$UA" -C - --retry 2 --retry-delay 3 --connect-timeout 15 \
+            --speed-limit 10240 --speed-time 60 -o /tmp/bbrv3.deb "$DOWNLOAD_URL"; then
+            break
+        fi
+        _sz=$(stat -c%s /tmp/bbrv3.deb 2>/dev/null || echo 0)
+        if [ -n "$_want" ] && [ "$_sz" = "$_want" ]; then break; fi
+        warn "下载中断（已得 ${_sz}B${_want:+ / ${_want}B}），续传重试 ${_i}/20…"
+        sleep 3
+    done
+    _sz=$(stat -c%s /tmp/bbrv3.deb 2>/dev/null || echo 0)
+    if [ -n "$_want" ] && [ "$_sz" != "$_want" ]; then
+        fail "BBRv3 下载不完整：${_sz}B / ${_want}B"
+        return 1
     fi
+    if [ "$_sz" -eq 0 ]; then fail "BBRv3 下载失败"; return 1; fi
 
     # ── 校验和：尽力而为，绝不阻断 ──
     # 上游（byJoey/Actions-bbr-v3 → ccAzy fork）都不产出 SHA256SUMS。
@@ -69,7 +94,10 @@ install_bbrv3() {
 
     if ! run dpkg -i /tmp/bbrv3.deb; then
         run apt-get install -f -y -qq || true
-        run dpkg -i /tmp/bbrv3.deb || { fail "BBRv3 安装失败"; return 1; }
+        run dpkg -i /tmp/bbrv3.deb || {
+            fail "BBRv3 安装失败"
+            return 1
+        }
     fi
 
     # 验证新内核文件已就位（防 dpkg 成功但未解包，重启后无法开机）
@@ -78,7 +106,8 @@ install_bbrv3() {
     if [ -n "$kernel_file" ]; then
         ok "新内核文件已就位: $kernel_file"
     else
-        fail "未检测到 bbrv3 内核文件，安装可能未生效，中止重启"; return 1
+        fail "未检测到 bbrv3 内核文件，安装可能未生效，中止重启"
+        return 1
     fi
 
     # grub 菜单可见（部分 VPS 默认 timeout=0）
@@ -90,27 +119,31 @@ install_bbrv3() {
     ok "BBRv3 已安装（重启后生效）"
 }
 
-
-
 apply_sysctl() {
     info "应用网络暴力优化..."
     local mem_kb mem_mb RMEM TCPMEM CONNTRACK_MAX CONNTRACK_HASH
     mem_kb=$(grep MemTotal /proc/meminfo 2>/dev/null | awk '{print $2}' || echo 0)
     mem_mb=$((mem_kb / 1024))
     if [ "$mem_mb" -ge 8192 ]; then
-        RMEM="134217728"; TCPMEM="65536 262144 1048576"       # ≥8GB，页数=256MB/1GB/4GB
+        RMEM="134217728"
+        TCPMEM="65536 262144 1048576" # ≥8GB，页数=256MB/1GB/4GB
     elif [ "$mem_mb" -ge 2048 ]; then
-        RMEM="67108864"; TCPMEM="32768 65536 131072"          # 2-8GB，页数=128MB/256MB/512MB
+        RMEM="67108864"
+        TCPMEM="32768 65536 131072" # 2-8GB，页数=128MB/256MB/512MB
     else
-        RMEM="16777216"; TCPMEM="16384 32768 65536"           # <2GB，页数=64MB/128MB/256MB
+        RMEM="16777216"
+        TCPMEM="16384 32768 65536" # <2GB，页数=64MB/128MB/256MB
     fi
 
     if [ "$mem_mb" -ge 8192 ]; then
-        CONNTRACK_MAX=1000000; CONNTRACK_HASH=262144
+        CONNTRACK_MAX=1000000
+        CONNTRACK_HASH=262144
     elif [ "$mem_mb" -ge 2048 ]; then
-        CONNTRACK_MAX=500000; CONNTRACK_HASH=131072
+        CONNTRACK_MAX=500000
+        CONNTRACK_HASH=131072
     else
-        CONNTRACK_MAX=130000; CONNTRACK_HASH=32768
+        CONNTRACK_MAX=130000
+        CONNTRACK_HASH=32768
     fi
 
     if command -v modprobe >/dev/null 2>&1; then
@@ -169,14 +202,16 @@ SYS"
     ok "网络参数已写入 $conf 并应用（conntrack=$CONNTRACK_MAX，按内存分级防 OOM）"
 }
 
-
-
 apply_ethtool() {
-    command -v ethtool >/dev/null 2>&1 || { info "ethtool 未安装，跳过网卡深度优化"; return 0; }
+    command -v ethtool >/dev/null 2>&1 || {
+        info "ethtool 未安装，跳过网卡深度优化"
+        return 0
+    }
     local iface
     iface=$(ip route 2>/dev/null | awk '/default/ {print $5; exit}' || true)
     if [ -z "$iface" ] || [ ! -d "/sys/class/net/$iface" ]; then
-        warn "无法识别默认网卡，跳过 ethtool"; return 1
+        warn "无法识别默认网卡，跳过 ethtool"
+        return 1
     fi
     run ethtool -G "$iface" rx 4096 tx 4096 || true
     run ethtool -K "$iface" tx-checksumming on rx-checksumming on || true
@@ -186,8 +221,6 @@ apply_ethtool() {
     run ethtool -C "$iface" rx-usecs 16 tx-usecs 16 || true
     ok "ethtool 深度优化完成（不支持的项已自动跳过）"
 }
-
-
 
 apply_qdisc() {
     local iface
@@ -203,8 +236,6 @@ apply_qdisc() {
     ok "fq 队列调度已应用到 $iface"
 }
 
-
-
 boost_limits() {
     run bash -c "cat > /etc/security/limits.d/99-vpnplus.conf <<'LIMITS'
 * soft nofile 1048576
@@ -218,8 +249,6 @@ root hard nproc 655360
 LIMITS"
     ok "资源限制已提升"
 }
-
-
 
 apply_rss() {
     # 多队列网络调优：所有 RX/TX 队列的 RPS/XPS + ethtool + fq 持久化。
@@ -286,19 +315,32 @@ UNIT"
     ok "多队列 RPS/XPS、ethtool、fq 已配置并持久化 (vpnplus-net-tuning.service)"
 }
 
-
-
 ensure_grub_boot() {
-    [ -f /boot/grub/grub.cfg ] || { warn "未找到 /boot/grub/grub.cfg，跳过默认内核校验"; return 1; }
+    [ -f /boot/grub/grub.cfg ] || {
+        warn "未找到 /boot/grub/grub.cfg，跳过默认内核校验"
+        return 1
+    }
     local entries=() target=-1 idx=0 e gd
     mapfile -t entries < <(grep -oP "menuentry '\K[^']+" /boot/grub/grub.cfg 2>/dev/null || true)
-    [ "${#entries[@]}" -eq 0 ] && { warn "无法解析 grub.cfg 菜单项，跳过"; return 1; }
+    [ "${#entries[@]}" -eq 0 ] && {
+        warn "无法解析 grub.cfg 菜单项，跳过"
+        return 1
+    }
     for e in "${entries[@]}"; do
-        if [[ "$e" == *bbrv3* ]]; then target=$idx; break; fi
+        if [[ "$e" == *bbrv3* ]]; then
+            target=$idx
+            break
+        fi
         idx=$((idx + 1))
     done
-    [ "$target" -lt 0 ] && { warn "grub.cfg 中未找到 BBRv3 菜单项"; return 1; }
-    if [ "$target" -eq 0 ]; then ok "GRUB 默认引导项已是 BBRv3"; return 0; fi
+    [ "$target" -lt 0 ] && {
+        warn "grub.cfg 中未找到 BBRv3 菜单项"
+        return 1
+    }
+    if [ "$target" -eq 0 ]; then
+        ok "GRUB 默认引导项已是 BBRv3"
+        return 0
+    fi
 
     gd=$(grep -oP '^GRUB_DEFAULT=\K.*' /etc/default/grub 2>/dev/null | head -1 || true)
     if [ "$gd" = "saved" ]; then
@@ -315,5 +357,3 @@ ensure_grub_boot() {
         info "GRUB_DEFAULT=$gd，BBRv3 位于 index $target；若重启未进新内核请手动改"
     fi
 }
-
-

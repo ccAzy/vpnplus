@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-09-23 — 修复：慢速链路下内核下载必然失败（固定 --max-time + 无断点续传）
+
+* **症状**：`deploy_optimize.sh` 卡在内核下载，反复报 `curl: (28) Operation timed out after 120001 milliseconds with 105431013 out of 141161094 bytes received` / `Throwing away 105431013 bytes`。
+* **根因（算术题，不是网络抖动）**：内核 deb **141,161,094 B（134MB）**，实测下行 **0.84 MB/s** → 下完需要 **161 秒**，而脚本给的是 `--max-time 120` → **每次尝试必然在第 120 秒被砍**；更糟的是 `--retry 3` **不带 `-C -`**，curl 每次重试都把已下载字节丢弃重下（日志里的 `Throwing away N bytes` 就是它）→ 4 次尝试全白跑。
+* **触发条件**：服务器下行低于约 1.18 MB/s（141MB ÷ 120s）就永远装不上内核。
+* **修复**（`lib/optimize.sh` 与 `deploy_optimize.sh` 内联兜底**两份同步**）：
+  * `-C -` **断点续传**：进度跨重试累积，不再丢弃
+  * `--speed-limit 10240 --speed-time 60` 做**停滞判定**：只在下行持续低于 10KB/s 达 60s 时才放弃，**不再按总时长砍**
+  * 用 `Content-Length` **校验完整性**（用 `tolower()` 匹配，兼容 Debian 默认的 mawk），尺寸对不上就明确失败，不留半个包
+* **验证**（离线 stub harness，11/11 通过）：两段续传后完成 / 文件已完整（服务端 416）/ 永远下不完应失败；每次都确认带 `-C -`。
+* **影响面**：`lib/singbox.sh` 里 sb.sh 的 `--max-time 120` 保留——那个文件只有 155KB，不存在这个风险。
+
 ## 2026-09-23 — 内核校验和降级为「尽力而为」：不再阻断安装
 
 * **起因**：用户反馈 `bash <(curl .../deploy_optimize.sh)` 装不上 BBRv3 内核。
