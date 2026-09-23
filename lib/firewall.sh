@@ -117,10 +117,16 @@ apply_antiprobe() {
     }; i=$((i + 2))
 
     # 5) SSH 爆破防御（轻量 fail2ban）
-    run iptables -A "$CHAIN_ANTIPROBE" -p tcp --dport 22 -m state --state NEW -m hashlimit \
-      --hashlimit-above "$SSH_RATE_ABOVE"/min --hashlimit-burst "$SSH_RATE_BURST" --hashlimit-mode srcip --hashlimit-name probe22 -j DROP
-    command -v ip6tables >/dev/null 2>&1 && run ip6tables -A "$CHAIN_ANTIPROBE" -p tcp --dport 22 -m state --state NEW -m hashlimit \
-      --hashlimit-above "$SSH_RATE_ABOVE"/min --hashlimit-burst "$SSH_RATE_BURST" --hashlimit-mode srcip --hashlimit-name probe22 -j DROP || true
+    # SSH 端口不写死 22：2026-09-23 实测服务器 SSH 常在 6688，写死 22 等于保护了错端口。
+    local _ssh_port="${SSH_PORT:-}"
+    [ -n "$_ssh_port" ] || _ssh_port=$(/usr/sbin/sshd -T 2>/dev/null | awk '/^port /{print $2; exit}')
+    [ -n "$_ssh_port" ] || _ssh_port=$(grep -rhsE '^[[:space:]]*Port[[:space:]]+' /etc/ssh/sshd_config /etc/ssh/sshd_config.d/ 2>/dev/null | awk '{print $2}' | head -1)
+    _ssh_port="${_ssh_port:-22}"
+    info "SSH 爆破防御目标端口: $_ssh_port"
+    run iptables -A "$CHAIN_ANTIPROBE" -p tcp --dport "$_ssh_port" -m state --state NEW -m hashlimit \
+      --hashlimit-above "$SSH_RATE_ABOVE"/min --hashlimit-burst "$SSH_RATE_BURST" --hashlimit-mode srcip --hashlimit-name probeSSH -j DROP
+    command -v ip6tables >/dev/null 2>&1 && run ip6tables -A "$CHAIN_ANTIPROBE" -p tcp --dport "$_ssh_port" -m state --state NEW -m hashlimit \
+      --hashlimit-above "$SSH_RATE_ABOVE"/min --hashlimit-burst "$SSH_RATE_BURST" --hashlimit-mode srcip --hashlimit-name probeSSH -j DROP || true
 
     # 6) 单 IP 连接数上限
     for p in "${TCP_PORTS[@]}"; do
