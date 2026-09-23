@@ -342,7 +342,14 @@ if ! declare -F install_bbrv3 >/dev/null 2>&1; then
             awk 'tolower($0) ~ /^content-length:/ {gsub(/[^0-9]/, "", $2); print $2}' | tail -1 || true)
         while [ "$_i" -lt 20 ]; do
             _i=$((_i + 1))
-            if curl -fL# -H "$UA" -C - --retry 2 --retry-delay 3 --connect-timeout 15 \
+            # 上一次异常退出可能把文件写超（旧版带 --retry 的副作用）→ 删掉重下
+            if [ -n "$_want" ] && [ "$(stat -c%s /tmp/bbrv3.deb 2>/dev/null || echo 0)" -gt "$_want" ]; then
+                warn "本地 deb 比远端大（$(stat -c%s /tmp/bbrv3.deb)B > ${_want}B），删除重下"
+                rm -f /tmp/bbrv3.deb
+            fi
+            # 刻意不加 --retry：curl 内部重试不重算续传偏移，会把数据从旧偏移再写一遍
+            # → 文件写重/写坏。重试一律交给外层 while（每次重读文件大小、重算 Range）。
+            if curl -fL# -H "$UA" -C - --connect-timeout 15 \
                 --speed-limit 10240 --speed-time 60 -o /tmp/bbrv3.deb "$DOWNLOAD_URL"; then
                 break
             fi
